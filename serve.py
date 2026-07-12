@@ -129,7 +129,10 @@ def main() -> None:
                 + " (+ optional 'task' string)")
     logger.info(f"replies: {meta['n_action_steps']} x {meta['action_dim']} actions per request | "
                 f"training fps: {meta['fps']}")
-    FicelleServer(host_obj, args.host, args.port, api_key=args.api_key).serve_forever()
+    try:
+        FicelleServer(host_obj, args.host, args.port, api_key=args.api_key).serve_forever()
+    except KeyboardInterrupt:
+        logger.info("shutting down (Ctrl-C)")
 
 
 if __name__ == "__main__":
