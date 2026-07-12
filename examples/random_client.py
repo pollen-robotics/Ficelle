@@ -34,11 +34,12 @@ def main() -> None:
     parser.add_argument("--api_key", default=None)
     parser.add_argument("-n", type=int, default=50, help="number of timed requests")
     parser.add_argument("--task", default="", help="task string to send (for VLA policies)")
+    parser.add_argument("--jpeg_quality", type=int, default=None, help="encode images as JPEG at this quality (1-100) before sending")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
     rng = np.random.default_rng(0)
-    with PolicyClient(args.host, args.port, api_key=args.api_key) as client:
+    with PolicyClient(args.host, args.port, api_key=args.api_key, jpeg_quality=args.jpeg_quality) as client:
         meta = client.metadata
         print(f"policy {meta['policy_type']} from {meta['checkpoint']} on {meta['device']} | "
               f"{meta['n_action_steps']} x {meta['action_dim']} actions per request | "
@@ -65,7 +66,8 @@ def main() -> None:
               f"p95 {np.percentile(rtt_a, 95):.1f} ms | "
               f"server infer p50 {np.percentile(infer_a, 50):.1f} ms "
               f"p95 {np.percentile(infer_a, 95):.1f} ms | "
-              f"network+serialization p50 {np.percentile(rtt_a - infer_a, 50):.1f} ms")
+              f"network+serialization p50 {np.percentile(rtt_a - infer_a, 50):.1f} ms | "
+              f"request payload ~{client.last_request_bytes / 1024:.0f} KiB")
         print(f"actions shape OK: {expected_shape}")
 
 
