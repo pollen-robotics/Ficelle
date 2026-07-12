@@ -1,0 +1,17 @@
+[project]
+name = "ficelle-client"
+version = "0.1.0"
+description = "Dependency-light client for a ficelle policy server (no torch, no lerobot)"
+requires-python = ">=3.10"
+dependencies = [
+    "websockets>=14",
+    "msgpack>=1.0",
+    "numpy>=1.22",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ficelle_client"]
