@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rtk ls *)",
+      "Bash(rtk find *)",
+      "Bash(rtk proxy *)",
+      "Bash(rtk curl *)",
+      "Read(//home/steve/Project/Repo/GRABETTE/**)",
+      "Bash(/usr/bin/find . -name \"factory.py\" -not -path \"./.git/*\")",
+      "Bash(/bin/ls -la)",
+      "Bash(/usr/bin/find src *)",
+      "Bash(rtk grep *)",
+      "Bash(/usr/bin/find src/lerobot/processor -name \"*.py\")",
+      "Bash(/usr/bin/find src/lerobot/datasets -name \"*.py\")",
+      "Bash(rtk git *)",
+      "Bash(rtk git -C /home/steve/Project/Repo/ficelle commit -m ' *)",
+      "Bash(git -C /home/steve/Project/Repo/ficelle checkout -b v0-prototype)"
+    ]
+  }
+}
