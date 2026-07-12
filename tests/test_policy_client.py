@@ -2,7 +2,9 @@ import numpy as np
 import pytest
 
 from ficelle_client import PolicyClient, PolicyServerError
+from policy_host import PolicyHost
 from tests.conftest import FakeHost, ServerThread
+from tests.test_policy_host import StubConfig, StubPolicy, identity
 
 
 def _good_obs(task=""):
@@ -79,3 +81,59 @@ def test_client_survives_server_restart(fake_host):
     finally:
         client.close()
         st2.stop()
+
+
+def _stub_policy_host():
+    return PolicyHost(StubPolicy(StubConfig()), identity, identity,
+                      checkpoint="stub/ckpt", device="cpu", fps=None)
+
+
+def _stacked_obs():
+    # Gradient content (not i.i.d. noise): JPEG needs spatial correlation to
+    # compress at all, so this is what makes the "big win or bust" size
+    # assertion below meaningful.
+    xx, yy = np.meshgrid(np.arange(96, dtype=np.uint8) * 2, np.arange(96, dtype=np.uint8) * 2)
+    frame0 = np.stack([xx, yy, np.full_like(xx, 32)], axis=-1)
+    frame1 = np.stack([np.full_like(xx, 200), xx[::-1], yy], axis=-1)
+    return {
+        "observation.images.cam0": np.stack([frame0, frame1]),
+        "observation.state": np.zeros((2, 2), dtype=np.float32),
+        "task": "pick",
+    }
+
+
+def test_jpeg_end_to_end_against_real_host():
+    st = ServerThread(_stub_policy_host())
+    try:
+        with PolicyClient("127.0.0.1", st.port, jpeg_quality=90) as client:
+            raw_size_estimate = _stacked_obs()["observation.images.cam0"].nbytes
+            reply = client.infer(_stacked_obs())
+            assert reply["actions"].shape == (8, 11)
+            assert client.last_request_bytes < raw_size_estimate / 5  # big win or bust
+    finally:
+        st.stop()
+
+
+def test_jpeg_caller_contract_unchanged():
+    # caller passes the SAME raw arrays as in raw mode; validation still runs
+    st = ServerThread(_stub_policy_host())
+    try:
+        with PolicyClient("127.0.0.1", st.port, jpeg_quality=90) as client:
+            bad = _stacked_obs()
+            bad["observation.state"] = np.zeros((2, 3), dtype=np.float32)
+            with pytest.raises(ValueError, match=r"shape \[2, 3\], expected \[2, 2\]"):
+                client.infer(bad)
+    finally:
+        st.stop()
+
+
+def test_jpeg_refused_when_server_is_raw_only(fake_host, server):
+    # FakeHost metadata has no "image_encodings" -> treat as raw-only
+    with pytest.raises(ValueError, match="does not support jpeg"):
+        PolicyClient("127.0.0.1", server.port, jpeg_quality=90)
+
+
+@pytest.mark.parametrize("quality", [0, 101, "high"])
+def test_jpeg_quality_validated(quality):
+    with pytest.raises(ValueError, match="jpeg_quality must be an integer between 1 and 100"):
+        PolicyClient.__new__(PolicyClient)._check_jpeg_quality(quality)
