@@ -12,6 +12,7 @@ import threading
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 from huggingface_hub import hf_hub_download
@@ -110,6 +111,7 @@ class PolicyHost:
             "chunk_size": int(getattr(cfg, "chunk_size", 0)) or self._n_action_steps,
             "action_dim": int(cfg.output_features[ACTION].shape[0]),
             "fps": fps,
+            "image_encodings": ["raw", "jpeg"],
             "observations": self._obs_spec,
         }
 
@@ -130,6 +132,7 @@ class PolicyHost:
         return spec
 
     def infer(self, obs: dict) -> dict:
+        obs = self._decode_images(obs)
         self._validate(obs)
         task = obs.get("task", "")
         frames = self._split_frames(obs)
@@ -176,6 +179,34 @@ class PolicyHost:
             for frame in frames:
                 frame[key] = np.zeros((h, w, c), dtype=np.uint8)
         return frames
+
+    def _decode_images(self, obs: dict) -> dict:
+        """Transport-level JPEG support: an image key may arrive as a list of
+        per-frame JPEG bytes (oldest first) instead of a raw uint8 array.
+        Decode back to the raw layout here; the normal validation and the
+        checkpoint's own pipeline then run unchanged — JPEG is lossy
+        compression at the transport layer, not a preprocessing change."""
+        decoded = dict(obs)
+        for key, spec in self._obs_spec.items():
+            val = obs.get(key)
+            if spec["kind"] != "image" or not isinstance(val, (list, tuple)):
+                continue
+            if len(val) != self._n_obs_steps:
+                raise ObservationError(
+                    f"'{key}': got {len(val)} JPEG frames, expected {self._n_obs_steps}"
+                )
+            frames = []
+            for i, buf in enumerate(val):
+                if not isinstance(buf, bytes):
+                    raise ObservationError(
+                        f"'{key}' frame {i}: expected JPEG bytes, got {type(buf).__name__}"
+                    )
+                img = cv2.imdecode(np.frombuffer(buf, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if img is None:
+                    raise ObservationError(f"'{key}' frame {i}: JPEG decode failed")
+                frames.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            decoded[key] = np.stack(frames) if self._n_obs_steps > 1 else frames[0]
+        return decoded
 
     def _validate(self, obs: dict) -> None:
         spec = self._obs_spec

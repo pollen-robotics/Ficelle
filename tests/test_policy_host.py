@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import pytest
 import torch
@@ -52,6 +53,56 @@ def _good_obs():
         "observation.state": np.zeros((2, 2), dtype=np.float32),
         "task": "pick",
     }
+
+
+def _jpeg(frame_rgb):
+    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR),
+                           [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+    assert ok
+    return buf.tobytes()
+
+
+def test_metadata_advertises_encodings(host):
+    assert host.metadata["image_encodings"] == ["raw", "jpeg"]
+
+
+def test_infer_accepts_jpeg_frame_list(host):
+    obs = _good_obs()
+    raw = np.random.default_rng(0).integers(0, 256, size=(2, 96, 96, 3), dtype=np.uint8)
+    obs["observation.images.cam0"] = [_jpeg(raw[0]), _jpeg(raw[1])]
+    reply = host.infer(obs)
+    assert reply["actions"].shape == (8, 11)
+    seen = host._policy.seen_batch["observation.images.cam0"]
+    assert tuple(seen.shape) == (1, 2, 3, 96, 96)  # decoded to the raw layout
+    # decoded pixels approximate the originals (JPEG lossy, but same image;
+    # catches RGB/BGR swaps, which produce a huge channel-wise error)
+    decoded = (seen[0].permute(0, 2, 3, 1).numpy() * 255).astype(np.uint8)
+    assert np.mean(np.abs(decoded.astype(int) - raw.astype(int))) < 8
+
+
+@pytest.mark.parametrize(
+    ("frames", "match"),
+    [
+        (lambda j: [j], "got 1 JPEG frames, expected 2"),
+        (lambda j: [j, "not-bytes"], "expected JPEG bytes, got str"),
+        (lambda j: [j, b"garbagegarbage"], "JPEG decode failed"),
+    ],
+)
+def test_jpeg_error_messages(host, frames, match):
+    obs = _good_obs()
+    j = _jpeg(np.zeros((96, 96, 3), dtype=np.uint8))
+    obs["observation.images.cam0"] = frames(j)
+    with pytest.raises(ObservationError, match=match) as excinfo:
+        host.infer(obs)
+    assert "\n" not in str(excinfo.value)
+
+
+def test_jpeg_wrong_decoded_size_hits_shape_validation(host):
+    obs = _good_obs()
+    small = np.zeros((48, 48, 3), dtype=np.uint8)
+    obs["observation.images.cam0"] = [_jpeg(small), _jpeg(small)]
+    with pytest.raises(ObservationError, match=r"shape \[2, 48, 48, 3\], expected \[2, 96, 96, 3\]"):
+        host.infer(obs)
 
 
 def test_metadata(host):
