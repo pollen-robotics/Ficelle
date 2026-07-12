@@ -10,6 +10,7 @@ Protocol ("ficelle/1", openpi-style — see README):
 
 import argparse
 import asyncio
+import hmac
 import http
 import logging
 import time
@@ -58,7 +59,9 @@ class FicelleServer:
     def _process_request(self, connection, request):
         if request.path == "/healthz":
             return connection.respond(http.HTTPStatus.OK, "OK\n")
-        if self._api_key is not None and request.headers.get("Authorization") != f"Api-Key {self._api_key}":
+        if self._api_key is not None and not hmac.compare_digest(
+            request.headers.get("Authorization", ""), f"Api-Key {self._api_key}"
+        ):
             return connection.respond(http.HTTPStatus.FORBIDDEN, "ficelle: invalid or missing api key\n")
         return None
 

@@ -59,7 +59,7 @@ class PolicyClient:
                         f"server at {self._uri} rejected the api key — check --api_key on both sides"
                     ) from None
                 raise
-            except ConnectionRefusedError:
+            except OSError:
                 logger.info(f"waiting for server at {self._uri} "
                             f"(retrying every {self._connect_retry_s:.0f}s)...")
                 time.sleep(self._connect_retry_s)
@@ -79,7 +79,12 @@ class PolicyClient:
             response = self._ws.recv()
         if isinstance(response, str):
             raise PolicyServerError(response)
-        return msgpack_numpy.unpackb(response)
+        reply = msgpack_numpy.unpackb(response)
+        if isinstance(reply.get("actions"), np.ndarray):
+            # msgpack-decoded arrays are read-only views of the receive buffer;
+            # robot code mutates chunks (clipping, scaling) — hand back a copy
+            reply["actions"] = np.array(reply["actions"])
+        return reply
 
     def _validate(self, obs: dict) -> None:
         spec = self.metadata["observations"]

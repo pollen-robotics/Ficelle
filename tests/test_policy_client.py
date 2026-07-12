@@ -28,6 +28,7 @@ def test_infer_returns_actions(client):
     reply = client.infer(_good_obs())
     assert reply["actions"].shape == (10, 2)
     assert reply["actions"].dtype == np.float32
+    assert reply["actions"].flags.writeable
 
 
 @pytest.mark.parametrize(
@@ -55,6 +56,15 @@ def test_server_error_raises_policy_server_error(client):
     # passes client-side validation; FakeHost rejects it server-side
     with pytest.raises(PolicyServerError, match="reject me"):
         client.infer(_good_obs(task="reject me"))
+
+
+def test_wrong_api_key_raises_actionable_error(fake_host):
+    st = ServerThread(fake_host, api_key="sekret")
+    try:
+        with pytest.raises(PolicyServerError, match="rejected the api key"):
+            PolicyClient("127.0.0.1", st.port, api_key="wrong")
+    finally:
+        st.stop()
 
 
 def test_client_survives_server_restart(fake_host):
