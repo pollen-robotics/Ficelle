@@ -8,6 +8,7 @@ Protocol ("ficelle/1", openpi-style — see README):
   errors keep the connection open, internal errors close it
 """
 
+import argparse
 import asyncio
 import http
 import logging
@@ -94,3 +95,42 @@ class FicelleServer:
                 return
             result.setdefault("server_timing", {})["total_ms"] = (time.monotonic() - start) * 1000.0
             await websocket.send(packer.pack(result))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--checkpoint", required=True,
+                        help="HF hub repo id or local checkpoint dir (the pretrained_model folder)")
+    parser.add_argument("--host", default="0.0.0.0",
+                        help="bind address — with Tailscale, bind your tailnet IP")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--api_key", default=None,
+                        help="optional shared secret; clients must pass the same api_key")
+    parser.add_argument("--device", default=None, help="default: cuda if available, else cpu")
+    parser.add_argument("--dtype", choices=["float32", "bfloat16"], default=None,
+                        help="cast policy weights (bfloat16 recommended for pi0fast)")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    # heavy imports deferred so `--help` and transport tests stay instant
+    import torch
+
+    from policy_host import load_policy_host
+
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    host_obj = load_policy_host(args.checkpoint, device, args.dtype)
+    meta = host_obj.metadata
+    logger.info(f"loaded {meta['policy_type']} from {meta['checkpoint']} on {meta['device']}")
+    logger.info("expected observations: "
+                + ", ".join(f"{k} {v['dtype']}{v['wire_shape']}"
+                            for k, v in meta["observations"].items())
+                + " (+ optional 'task' string)")
+    logger.info(f"replies: {meta['n_action_steps']} x {meta['action_dim']} actions per request | "
+                f"training fps: {meta['fps']}")
+    FicelleServer(host_obj, args.host, args.port, api_key=args.api_key).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -42,7 +42,7 @@ class FakeHost:
             raise ObservationError("task 'reject me' rejected as requested")
         if obs.get("task") == "crash":           # hook for internal-error tests
             raise RuntimeError("fake internal crash")
-        return {"actions": np.zeros((10, 2), dtype=np.float32)}
+        return {"actions": np.zeros((10, 2), dtype=np.float32), "server_timing": {"infer_ms": 1.0}}
 
 
 def free_port() -> int:
