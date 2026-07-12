@@ -51,8 +51,11 @@ def main() -> None:
 
         rtt, infer = [], []
         for i in range(args.n):
+            # generate the observation OUTSIDE the timed bracket: rng over full
+            # image stacks costs milliseconds and isn't client/wire/server time
+            obs = synthetic_obs(meta, args.task, rng)
             t0 = time.perf_counter()
-            reply = client.infer(synthetic_obs(meta, args.task, rng))
+            reply = client.infer(obs)
             rtt.append((time.perf_counter() - t0) * 1000.0)
             infer.append(reply["server_timing"]["infer_ms"])
             print(f"req {i:3d} | rtt {rtt[-1]:7.1f} ms | server infer {infer[-1]:7.1f} ms")
