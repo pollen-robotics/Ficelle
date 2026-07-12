@@ -15,6 +15,7 @@ import time
 import traceback
 
 import websockets.asyncio.server
+import websockets.exceptions
 import websockets.frames
 
 from errors import ObservationError
@@ -58,14 +59,17 @@ class FicelleServer:
 
     async def _handler(self, websocket):
         logger.info(f"connection from {websocket.remote_address} opened")
+        try:
+            await self._serve_connection(websocket)
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        logger.info(f"connection from {websocket.remote_address} closed")
+
+    async def _serve_connection(self, websocket) -> None:
         packer = msgpack_numpy.Packer()
         await websocket.send(packer.pack(self._policy_host.metadata))
         while True:
-            try:
-                request = await websocket.recv()
-            except websockets.exceptions.ConnectionClosed:
-                logger.info(f"connection from {websocket.remote_address} closed")
-                return
+            request = await websocket.recv()
             start = time.monotonic()
             try:
                 obs = msgpack_numpy.unpackb(request)

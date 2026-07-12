@@ -67,6 +67,19 @@ def test_internal_error_sends_text_then_closes(server):
             ws.recv()
 
 
+def test_non_dict_payload_rejected(server):
+    with _connect(server.port) as ws:
+        ws.recv()  # metadata
+        ws.send(msgpack_numpy.packb([1, 2, 3]))
+        reply = ws.recv()
+        assert isinstance(reply, str)
+        assert reply.startswith("ficelle: ")
+        assert "observation dict" in reply
+        # connection still usable after a validation error
+        ws.send(msgpack_numpy.packb(_good_obs()))
+        assert isinstance(ws.recv(), bytes)
+
+
 def test_server_survives_client_disconnect(server):
     for _ in range(2):  # connect, use, hard-drop, repeat
         ws = _connect(server.port)

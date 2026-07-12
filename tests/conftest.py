@@ -96,6 +96,9 @@ class ServerThread:
             time.sleep(0.01)
         self._loop.call_soon_threadsafe(self._stop_event.set)
         self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            raise RuntimeError(f"server thread on port {self.port} did not stop within 5s")
+        self._loop.close()
 
 
 @pytest.fixture
