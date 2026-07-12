@@ -89,12 +89,12 @@ class PolicyClient:
         for key in obs:
             if key != "task" and key not in spec:
                 raise ValueError(
-                    f"unknown observation key '{key}' — the server expects {sorted(spec)}"
+                    f"unknown observation key '{key}' — expected {sorted(spec)} (+ optional 'task')"
                 )
         for key, s in spec.items():
             if key not in obs:
                 raise ValueError(
-                    f"missing observation key '{key}' — the server expects {sorted(spec)}"
+                    f"missing observation key '{key}' — expected {sorted(spec)} (+ optional 'task')"
                 )
             arr = obs[key]
             if not isinstance(arr, np.ndarray):

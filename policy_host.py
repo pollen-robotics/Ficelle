@@ -79,7 +79,9 @@ class PolicyHost:
 
     Known limit: a diffusion checkpoint with n_obs_steps == 1 would trip an
     upstream shape assert in offline mode (state would need a time axis);
-    no such checkpoint is in scope for v0.
+    no such checkpoint is in scope for v0. Likewise, a policy combining empty_camera_*
+    slots with n_obs_steps > 1 would carry only the last frame's zero-fill into the
+    stacked batch; no such checkpoint is in scope for v0.
     """
 
     def __init__(self, policy, preprocessor, postprocessor, checkpoint: str,
