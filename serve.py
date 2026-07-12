@@ -34,6 +34,10 @@ class FicelleServer:
         self._host = host
         self._port = port
         self._api_key = api_key
+        # Exposed once run() starts listening so an external caller (e.g.
+        # ServerThread.stop() in tests) can force-close open connections
+        # before cancelling run() — see that method's docstring for why.
+        self._ws_server = None
 
     def serve_forever(self) -> None:
         asyncio.run(self.run())
@@ -47,6 +51,7 @@ class FicelleServer:
             max_size=None,
             process_request=self._process_request,
         ) as server:
+            self._ws_server = server
             logger.info(f"serving on ws://{self._host}:{self._port}")
             await server.serve_forever()
 
