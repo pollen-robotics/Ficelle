@@ -75,16 +75,6 @@ class ServerThread:
         server_task = asyncio.ensure_future(self._server.run())
         stop_task = asyncio.ensure_future(self._stop_event.wait())
         await asyncio.wait([server_task, stop_task], return_when=asyncio.FIRST_COMPLETED)
-        # Force-close any still-open client connections before cancelling.
-        # Cancelling server_task alone relies on asyncio.Server.serve_forever()'s
-        # own CancelledError handler, which calls the *raw* Server.close()/
-        # wait_closed() — that variant never sends a close frame, so it waits
-        # forever for a client that never disconnects on its own (exactly what
-        # a PolicyClient does: it holds the connection open across calls).
-        # Server.close() (the websockets-level one) does send close frames and
-        # actually tears down open connections, which lets everything unblock.
-        if self._server._ws_server is not None:
-            self._server._ws_server.close()
         server_task.cancel()
         try:
             await server_task
