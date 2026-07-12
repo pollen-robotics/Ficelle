@@ -86,7 +86,8 @@ def test_offline_chunk_matches_select_action_queue_path(diffusion_host):
 
 
 def test_end_to_end_over_websocket(diffusion_host):
-    from ficelle_client import PolicyClient, PolicyServerError
+    import websockets.sync.client
+    from ficelle_client import PolicyClient, msgpack_numpy
     from tests.conftest import ServerThread
 
     st = ServerThread(diffusion_host)
@@ -101,5 +102,19 @@ def test_end_to_end_over_websocket(diffusion_host):
             bad["observation.state"] = bad["observation.state"][:1]
             with pytest.raises(ValueError, match="expected"):
                 client.infer(bad)
+            # acceptance test 3, server side: bypass the client's pre-validation with
+            # a raw websocket so the REAL server must produce the one-line error itself
+            with websockets.sync.client.connect(
+                f"ws://127.0.0.1:{st.port}", compression=None, max_size=None
+            ) as ws:
+                ws.recv()  # metadata frame
+                bad = _synthetic_obs(meta, np.random.default_rng(4))
+                bad["observation.state"] = bad["observation.state"][:1]
+                ws.send(msgpack_numpy.packb(bad))
+                reply = ws.recv()
+                assert isinstance(reply, str)
+                assert reply.startswith("ficelle: ")
+                assert "\n" not in reply.strip()
+                assert "observation.state" in reply
     finally:
         st.stop()
