@@ -68,7 +68,11 @@ def test_metadata_advertises_encodings(host):
 
 def test_infer_accepts_jpeg_frame_list(host):
     obs = _good_obs()
-    raw = np.random.default_rng(0).integers(0, 256, size=(2, 96, 96, 3), dtype=np.uint8)
+    xx, yy = np.meshgrid(np.arange(96, dtype=np.uint8) * 2,
+                         np.arange(96, dtype=np.uint8) * 2)
+    frame0 = np.stack([xx, yy, np.full_like(xx, 32)], axis=-1)       # R=x-grad, G=y-grad, B=flat
+    frame1 = np.stack([np.full_like(xx, 200), xx[::-1], yy], axis=-1)
+    raw = np.stack([frame0, frame1])
     obs["observation.images.cam0"] = [_jpeg(raw[0]), _jpeg(raw[1])]
     reply = host.infer(obs)
     assert reply["actions"].shape == (8, 11)
@@ -77,7 +81,7 @@ def test_infer_accepts_jpeg_frame_list(host):
     # decoded pixels approximate the originals (JPEG lossy, but same image;
     # catches RGB/BGR swaps, which produce a huge channel-wise error)
     decoded = (seen[0].permute(0, 2, 3, 1).numpy() * 255).astype(np.uint8)
-    assert np.mean(np.abs(decoded.astype(int) - raw.astype(int))) < 8
+    assert np.mean(np.abs(decoded.astype(int) - raw.astype(int))) < 5
 
 
 @pytest.mark.parametrize(
