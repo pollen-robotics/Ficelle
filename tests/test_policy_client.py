@@ -103,13 +103,20 @@ def _stacked_obs():
 
 
 def test_jpeg_end_to_end_against_real_host():
-    st = ServerThread(_stub_policy_host())
+    host = _stub_policy_host()
+    st = ServerThread(host)
     try:
         with PolicyClient("127.0.0.1", st.port, jpeg_quality=90) as client:
-            raw_size_estimate = _stacked_obs()["observation.images.cam0"].nbytes
-            reply = client.infer(_stacked_obs())
+            obs = _stacked_obs()
+            reply = client.infer(obs)
             assert reply["actions"].shape == (8, 11)
-            assert client.last_request_bytes < raw_size_estimate / 5  # big win or bust
+            assert client.last_request_bytes < obs["observation.images.cam0"].nbytes / 5
+            # pixel-level roundtrip through the REAL client encoder and server
+            # decoder — catches an RGB/BGR swap on either side (gradient
+            # frames make a swap blow the mean error far past 5)
+            seen = host._policy.seen_batch["observation.images.cam0"]  # (1, 2, 3, 96, 96), float [0,1]
+            decoded = seen[0].permute(0, 2, 3, 1).numpy() * 255
+            assert np.mean(np.abs(decoded - obs["observation.images.cam0"].astype(float))) < 5
     finally:
         st.stop()
 
