@@ -18,6 +18,7 @@ dependencies = [
     # serving
     "websockets>=14",
     "ficelle-client",
+    "iroh>=1,<2",
 ]
 
 [dependency-groups]

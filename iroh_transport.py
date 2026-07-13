@@ -1,0 +1,127 @@
+"""ficelle: serve any LeRobot policy checkpoint over iroh (QUIC + NAT hole-
+punching, see experiments/iroh_probe/).
+
+Protocol ("ficelle/1" over the ALPN below), one request per QUIC bidirectional
+stream:
+- client opens a bi stream, writes a single framed request, finishes its send
+  side: `bytes([opcode]) + payload`
+    - OP_META: no payload; reply is one msgpack frame, the metadata dict
+    - OP_INFER: payload is a msgpack observation dict; reply is
+      `bytes([status]) + msgpack frame` where status is ST_OK (body is the
+      {"actions": ..., "server_timing": {...}} dict) or ST_ERR (body is a
+      one-line "ficelle: ..." UTF-8 error message)
+- an unknown opcode is answered the same way as an observation error: ST_ERR
+  and a one-line message.
+"""
+
+import asyncio
+import logging
+
+import iroh
+
+from errors import ObservationError
+from ficelle_client import msgpack_numpy
+
+logger = logging.getLogger("ficelle")
+
+ALPN = b"ficelle/1"
+OP_META = 0x00
+OP_INFER = 0x01
+ST_OK = 0x00
+ST_ERR = 0x01
+MAX_FRAME = 8_000_000
+
+
+def _set_event_loop() -> None:
+    # iroh-ffi bridges Rust async to the running asyncio loop; required before
+    # any awaited iroh call (see experiments/iroh_probe/iroh_probe.py).
+    try:
+        iroh.iroh_ffi.uniffi_set_event_loop(asyncio.get_running_loop())
+    except AttributeError:
+        pass  # newer bindings may set this implicitly
+
+
+async def handle_stream(bi, policy_host) -> None:
+    """Serve one request on one bidirectional stream, then close it.
+
+    Reusable by tests: takes anything with a bi.recv()/bi.send() pair shaped
+    like an iroh BiStream, and a policy_host with .metadata/.infer().
+    """
+    recv, send = bi.recv(), bi.send()
+    req = await recv.read_to_end(MAX_FRAME)
+    try:
+        if not req:
+            raise ObservationError("empty request")
+        op, payload = req[0], req[1:]
+        if op == OP_META:
+            await send.write_all(msgpack_numpy.packb(policy_host.metadata))
+            await send.finish()
+            return
+        if op != OP_INFER:
+            raise ObservationError(f"unknown opcode {op:#04x} (expected META=0 or INFER=1)")
+        obs = msgpack_numpy.unpackb(payload)
+        # inference runs in a thread so the event loop keeps serving other
+        # streams during a long (0.5 s pi0fast) forward pass — same reasoning
+        # as the websocket server's asyncio.to_thread (see serve.py).
+        result = await asyncio.to_thread(policy_host.infer, obs)
+        await send.write_all(bytes([ST_OK]) + msgpack_numpy.packb(result))
+    except ObservationError as e:
+        await send.write_all(bytes([ST_ERR]) + f"ficelle: {e}".encode())
+    except Exception as e:  # noqa: BLE001 — protect the accept loop, report to client
+        logger.exception("internal error handling iroh stream")
+        await send.write_all(bytes([ST_ERR]) + f"ficelle: internal server error ({type(e).__name__})".encode())
+    await send.finish()
+
+
+class IrohPolicyServer:
+    """iroh transport around a policy host: any object with .metadata (dict)
+    and .infer(obs dict) -> reply dict (raising ObservationError on bad
+    client input) — the same contract FicelleServer (websocket) wraps."""
+
+    def __init__(self, policy_host, relay_url: str | None = None):
+        self._policy_host = policy_host
+        self._relay_url = relay_url
+        self._ep: iroh.Endpoint | None = None
+        self._ready = asyncio.Event()
+
+    def _options(self) -> "iroh.EndpointOptions":
+        kwargs = {"preset": iroh.preset_n0(), "alpns": [ALPN]}
+        if self._relay_url is not None:
+            kwargs["relay_mode"] = iroh.RelayMode.custom_from_urls([self._relay_url])
+        return iroh.EndpointOptions(**kwargs)
+
+    async def wait_ready(self) -> None:
+        """Resolve once the endpoint is bound and addr()/ticket() are valid."""
+        await self._ready.wait()
+
+    def addr(self):
+        return self._ep.addr()
+
+    def ticket(self) -> str:
+        return str(iroh.EndpointTicket.from_addr(self._ep.addr()))
+
+    async def run(self) -> None:
+        _set_event_loop()
+        self._ep = await iroh.Endpoint.bind(self._options())
+        self._ready.set()
+        logger.info(f"iroh node id: {self._ep.id()}")
+        logger.info(f"iroh ticket:  {self.ticket()}")
+        while True:
+            incoming = await self._ep.accept_next()
+            if incoming is None:
+                break
+            asyncio.ensure_future(self._serve_connection(incoming))
+
+    async def _serve_connection(self, incoming) -> None:
+        try:
+            conn = await (await incoming.accept()).connect()
+        except Exception:  # noqa: BLE001 — a failed handshake shouldn't kill the accept loop
+            logger.exception("iroh connection failed to establish")
+            return
+        logger.info(f"iroh connection from {conn.remote_id()}")
+        try:
+            while True:
+                bi = await conn.accept_bi()
+                asyncio.ensure_future(handle_stream(bi, self._policy_host))
+        except Exception:  # noqa: BLE001 — connection closed ends the loop, same as the probe
+            logger.info(f"iroh connection from {conn.remote_id()} closed")

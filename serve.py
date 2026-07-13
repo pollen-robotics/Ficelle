@@ -113,6 +113,11 @@ def main() -> None:
     parser.add_argument("--device", default=None, help="default: cuda if available, else cpu")
     parser.add_argument("--dtype", choices=["float32", "bfloat16"], default=None,
                         help="cast policy weights (bfloat16 recommended for pi0fast)")
+    parser.add_argument("--transport", choices=["websocket", "iroh"], default="websocket",
+                        help="websocket (default, needs Tailscale/VPN for remote use) or "
+                             "iroh (QUIC with built-in NAT hole-punching, see experiments/iroh_probe/)")
+    parser.add_argument("--relay-url", default=None,
+                        help="iroh transport only: self-hosted relay URL (else n0 public relays)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -133,7 +138,23 @@ def main() -> None:
     logger.info(f"replies: {meta['n_action_steps']} x {meta['action_dim']} actions per request | "
                 f"training fps: {meta['fps']}")
     try:
-        FicelleServer(host_obj, args.host, args.port, api_key=args.api_key).serve_forever()
+        if args.transport == "iroh":
+            # deferred so websocket-only users don't need iroh installed
+            from iroh_transport import IrohPolicyServer
+
+            server = IrohPolicyServer(host_obj, relay_url=args.relay_url)
+
+            async def _run():
+                run_task = asyncio.ensure_future(server.run())
+                await server.wait_ready()
+                logger.info("=" * 60)
+                logger.info(f"iroh ticket: {server.ticket()}")
+                logger.info("=" * 60)
+                await run_task
+
+            asyncio.run(_run())
+        else:
+            FicelleServer(host_obj, args.host, args.port, api_key=args.api_key).serve_forever()
     except KeyboardInterrupt:
         logger.info("shutting down (Ctrl-C)")
 
