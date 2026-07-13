@@ -152,8 +152,11 @@ async def serve(relay_url: str | None) -> None:
                   flush=True)
 
 
+SWEEP_SIZES = [1_000, 25_000, 100_000, 250_000, 1_000_000]
+
+
 async def probe(ticket_str: str, payload_bytes: int, count: int, warmup: int,
-                relay_url: str | None) -> None:
+                relay_url: str | None, sweep: list[int] | None) -> None:
     ep = await iroh.Endpoint.bind(_endpoint_options(accept=False, relay_url=relay_url))
     ticket = iroh.EndpointTicket.from_string(ticket_str)
     addr = ticket.endpoint_addr()
@@ -161,9 +164,7 @@ async def probe(ticket_str: str, payload_bytes: int, count: int, warmup: int,
     conn = await ep.connect(addr, ALPN)
     print(f"connected to {conn.remote_id()}")
 
-    payload = bytes(payload_bytes)
-
-    async def one_request() -> float:
+    async def one_request(payload: bytes) -> float:
         t0 = time.perf_counter()
         bi = await conn.open_bi()
         send, recv = bi.send(), bi.recv()
@@ -176,24 +177,28 @@ async def probe(ticket_str: str, payload_bytes: int, count: int, warmup: int,
     t_connect = time.perf_counter()
     print("\n--- connection paths at t=0 ---")
     print(describe_paths(conn), flush=True)
-    time_to_direct = None
-    if looks_direct(conn):
-        time_to_direct = 0.0
+    time_to_direct = 0.0 if looks_direct(conn) else None
 
     # warmup (also gives hole-punch a moment to upgrade relay -> direct)
     for _ in range(warmup):
-        await one_request()
+        await one_request(bytes(1000))
         if time_to_direct is None and looks_direct(conn):
             time_to_direct = time.perf_counter() - t_connect
 
-    rtts = []
-    flips_to_relay = 0
-    for i in range(count):
-        rtts.append(await one_request())
+    def stats_line(label: str, rtts: list[float]) -> str:
+        q = lambda n: statistics.quantiles(rtts, n=100)[n - 1] if len(rtts) > 1 else rtts[0]
+        mean = statistics.mean(rtts)
+        return (f"  {label:>10} | p50 {q(50):6.1f}  p95 {q(95):6.1f}  p99 {q(99):6.1f} ms"
+                f" | {1000.0/mean:6.1f} Hz")
+
+    sizes = sweep if sweep else [payload_bytes]
+    results = []
+    for size in sizes:
+        payload = bytes(size)
+        rtts = [await one_request(payload) for _ in range(count)]
         if time_to_direct is None and looks_direct(conn):
             time_to_direct = time.perf_counter() - t_connect
-        if i and looks_direct(conn) is False and time_to_direct is not None:
-            flips_to_relay += 1
+        results.append((size, rtts))
 
     print("\n--- connection paths after run ---")
     print(describe_paths(conn))
@@ -202,19 +207,16 @@ async def probe(ticket_str: str, payload_bytes: int, count: int, warmup: int,
     except Exception as e:  # noqa: BLE001
         print(f"stats() unavailable: {e}")
 
-    p = lambda q: statistics.quantiles(rtts, n=100)[q - 1] if len(rtts) > 1 else rtts[0]
-    mean = statistics.mean(rtts)
-    print("\n============================================================")
-    print(f"  iroh probe: {count} requests, payload {payload_bytes/1000:.0f} KB up / "
-          f"{REPLY_BYTES/1000:.0f} KB down")
     direct = looks_direct(conn)
+    print("\n============================================================")
+    print(f"  iroh probe: {count} req/size, {REPLY_BYTES/1000:.0f} KB reply down")
     print(f"  path:            {'DIRECT' if direct else 'RELAY' if direct is False else 'UNKNOWN (see dump)'}")
     print(f"  time to direct:  {time_to_direct*1000:.0f} ms" if time_to_direct is not None
           else "  time to direct:  n/a")
-    print(f"  relay flips:     {flips_to_relay}")
-    print(f"  rtt min/mean:    {min(rtts):.1f} / {mean:.1f} ms")
-    print(f"  rtt p50/p95/p99: {p(50):.1f} / {p(95):.1f} / {p(99):.1f} ms")
-    print(f"  effective rate:  {1000.0/mean:.1f} Hz (control loop target: 30 Hz)")
+    print(f"  conn.rtt:        {conn.rtt() if callable(conn.rtt) else conn.rtt} ms")
+    print("  ---- round-trip by request payload (30 Hz control target) ----")
+    for size, rtts in results:
+        print(stats_line(f"{size/1000:.0f}KB", rtts))
     print("============================================================")
     await ep.close()
 
@@ -237,13 +239,17 @@ async def main() -> None:
     pp.add_argument("-n", "--count", type=int, default=100)
     pp.add_argument("--warmup", type=int, default=5)
     pp.add_argument("--relay-url", default=None)
+    pp.add_argument("--sweep", action="store_true",
+                    help="run several payload sizes back-to-back on one connection "
+                         "and print the payload->latency curve (ignores --profile)")
     args = parser.parse_args()
 
     if args.cmd == "serve":
         await serve(args.relay_url)
     else:
         size = args.payload_bytes if args.payload_bytes is not None else PROFILES[args.profile]
-        await probe(args.ticket, size, args.count, args.warmup, args.relay_url)
+        await probe(args.ticket, size, args.count, args.warmup, args.relay_url,
+                    SWEEP_SIZES if args.sweep else None)
 
 
 if __name__ == "__main__":

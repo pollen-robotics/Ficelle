@@ -24,8 +24,10 @@ uv run python iroh_probe.py probe <ticket> --profile jpeg -n 100
 
 Profiles: `control` (~1 KB), `jpeg` (~250 KB, a JPEG-encoded 2-frame obs),
 `raw` (~4 MB, an uncompressed obs). `--payload-bytes N` overrides.
-`--relay-url https://your.relay/` points fallback at a self-hosted relay
-(`RelayMode.custom_from_urls`) once we deploy one.
+`--sweep` runs several sizes (1/25/100/250/1000 KB) back-to-back on one
+connection and prints the payload→latency curve — the fastest way to see
+where your link sits. `--relay-url https://your.relay/` points fallback at a
+self-hosted relay (`RelayMode.custom_from_urls`) once we deploy one.
 
 Loopback (one machine, two terminals) validates the code but always reports a
 direct local path — real direct-vs-relay and latency numbers need two networks.
@@ -44,6 +46,25 @@ requests clear the 30 Hz target with margin. The per-request bidi-stream pattern
 plus the 4 MB throughput ceiling (~10 MB/s on loopback) suggests a
 receive-window / stream-reuse tuning question (`conn.set_receive_window`,
 persistent stream) to explore during the real integration — flagged, not solved.
+
+## First cross-machine run (2026-07-13, real internet, direct IPv6 path)
+
+Hole-punched relay→DIRECT in **203 ms**, stayed direct, 0 flips, ~0.03% loss.
+Base path RTT ~43 ms. Round-trip is payload-bound, not latency-bound:
+
+| request payload | rtt p50 (real link) | rtt p50 (loopback) |
+|---|---|---|
+| 1 KB | ~0.4 ms* | 0.4 ms |
+| 250 KB | 94 ms | 23 ms |
+| 1 MB | — | 92 ms |
+
+(*run `--sweep` on the real link to fill this in.) At 250 KB the round trip is
+~94 ms (≈2–3 RTTs to push ~200 packets through the congestion window), i.e.
+~10 Hz raw request rate. For chunked sync control that's plenty (a chunk of 8
+at 30 fps is requested only ~3.75 Hz), but each refill blocks ~94 ms + server
+inference — so shrinking the payload (resized/higher-compression JPEG, ~25 KB →
+~1 RTT) is the highest-leverage, behavior-safe latency win. Async chunk
+replacement is NOT an option (breaks these grasp policies — see project notes).
 
 ## iroh 1.0 Python API notes (confirmed at runtime, for the integration)
 
