@@ -13,7 +13,7 @@ import numpy as np
 import websockets.exceptions
 import websockets.sync.client
 
-from ficelle_client import msgpack_numpy
+from ficelle_client import _obsval, msgpack_numpy
 
 logger = logging.getLogger("ficelle.client")
 
@@ -53,40 +53,11 @@ class PolicyClient:
 
     @staticmethod
     def _check_jpeg_quality(quality) -> None:
-        if not isinstance(quality, int) or not 1 <= quality <= 100:
-            raise ValueError(f"jpeg_quality must be an integer between 1 and 100, got {quality!r}")
+        _obsval.check_jpeg_quality(quality)
 
     @staticmethod
     def _pick_jpeg_encoder(quality: int):
-        """cv2 if available, else PIL — chosen once, fail fast with install hint."""
-        try:
-            import cv2
-
-            def encode(frame):  # frame: uint8 HWC RGB
-                ok, buf = cv2.imencode(".jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
-                                       [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-                if not ok:
-                    raise RuntimeError("cv2.imencode failed")
-                return buf.tobytes()
-
-            return encode
-        except ImportError:
-            pass
-        try:
-            import io
-
-            from PIL import Image
-
-            def encode(frame):
-                out = io.BytesIO()
-                Image.fromarray(frame).save(out, format="JPEG", quality=quality)
-                return out.getvalue()
-
-            return encode
-        except ImportError:
-            raise ValueError(
-                "jpeg_quality requires an image codec: pip install opencv-python-headless (or pillow)"
-            ) from None
+        return _obsval.pick_jpeg_encoder(quality)
 
     def _connect(self):
         headers = {"Authorization": f"Api-Key {self._api_key}"} if self._api_key else None
@@ -138,42 +109,12 @@ class PolicyClient:
         return reply
 
     def _validate(self, obs: dict) -> None:
-        spec = self.metadata["observations"]
-        n_obs = self.metadata.get("n_obs_steps", 1)
-        if "task" in obs and not isinstance(obs["task"], str):
-            raise ValueError(f"'task' must be a string, got {type(obs['task']).__name__}")
-        for key in obs:
-            if key != "task" and key not in spec:
-                raise ValueError(
-                    f"unknown observation key '{key}' — expected {sorted(spec)} (+ optional 'task')"
-                )
-        for key, s in spec.items():
-            if key not in obs:
-                raise ValueError(
-                    f"missing observation key '{key}' — expected {sorted(spec)} (+ optional 'task')"
-                )
-            arr = obs[key]
-            if not isinstance(arr, np.ndarray):
-                raise ValueError(f"'{key}' must be a numpy array, got {type(arr).__name__}")
-            if list(arr.shape) != list(s["wire_shape"]):
-                hint = f" ({n_obs} frames stacked oldest-first)" if n_obs > 1 else ""
-                raise ValueError(
-                    f"'{key}' has shape {list(arr.shape)}, expected {list(s['wire_shape'])}{hint}"
-                )
-            if str(arr.dtype) != s["dtype"]:
-                raise ValueError(f"'{key}' has dtype {arr.dtype}, expected {s['dtype']}")
+        _obsval.validate_obs(self.metadata, obs)
 
     def _encode_jpeg(self, obs: dict) -> dict:
         """Encode validated raw image arrays to per-frame JPEG bytes (oldest
         first). Callers keep passing raw arrays — this is transport-only."""
-        encoded = dict(obs)
-        for key, spec in self.metadata["observations"].items():
-            if spec["kind"] != "image":
-                continue
-            arr = obs[key]
-            frames = arr if arr.ndim == 4 else arr[None]
-            encoded[key] = [self._encode_frame(np.ascontiguousarray(f)) for f in frames]
-        return encoded
+        return _obsval.encode_jpeg(self.metadata, obs, self._encode_frame)
 
     def close(self) -> None:
         self._ws.close()

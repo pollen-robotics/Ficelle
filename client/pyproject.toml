@@ -9,6 +9,9 @@ dependencies = [
     "numpy>=1.22",
 ]
 
+[project.optional-dependencies]
+iroh = ["iroh>=1,<2"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

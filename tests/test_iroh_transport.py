@@ -4,13 +4,19 @@ loopback only (RelayMode.disabled(), dial server.addr() directly — no network,
 no relays, no n0 discovery)."""
 
 import asyncio
+import pathlib
+import subprocess
+import sys
+import threading
+import time
 
 import iroh
 import numpy as np
 import pytest
 
 from iroh_transport import ALPN, MAX_FRAME, OP_INFER, OP_META, ST_ERR, ST_OK, IrohPolicyServer
-from ficelle_client import msgpack_numpy
+import ficelle_client
+from ficelle_client import IrohPolicyClient, PolicyServerError, msgpack_numpy
 from policy_host import PolicyHost
 from tests.test_policy_host import StubConfig, StubPolicy, identity
 
@@ -140,3 +146,171 @@ def test_unknown_opcode_errors():
         assert "\n" not in text
 
     asyncio.run(body())
+
+
+# ---------------------------------------------------------------------------
+# Client-half tests: the SYNC IrohPolicyClient against a real IrohPolicyServer.
+#
+# The server runs in a SEPARATE PROCESS (tests/_iroh_stub_server.py), not a
+# background thread: iroh-ffi's uniffi_set_event_loop is process-global, so
+# co-hosting a server loop and the client's loop in one process makes the
+# second registration win and deadlocks the first. Separate processes is also
+# how real deployments and experiments/iroh_probe run. Each test spawns the
+# stub server, reads its printed TICKET, drives the in-process client, then
+# terminates the subprocess.
+# ---------------------------------------------------------------------------
+
+_STUB_SERVER = str(pathlib.Path(__file__).with_name("_iroh_stub_server.py"))
+
+
+class StubServerProcess:
+    """Spawn tests/_iroh_stub_server.py, block until it prints its ticket."""
+
+    def __init__(self, *extra_args: str, ticket_timeout: float = 30.0):
+        self._proc = subprocess.Popen(
+            [sys.executable, _STUB_SERVER, *extra_args],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.ticket = self._read_ticket(ticket_timeout)
+
+    def _read_ticket(self, timeout: float) -> str:
+        """Read stdout on a helper thread so a wedged spawn can't hang the
+        suite forever — if no TICKET line arrives in `timeout`, kill the
+        process and fail with whatever it wrote to stderr."""
+        result: dict = {}
+
+        def reader():
+            for line in self._proc.stdout:
+                if line.startswith("TICKET "):
+                    result["ticket"] = line[len("TICKET "):].strip()
+                    return
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        t.join(timeout)
+        if "ticket" not in result:
+            self._proc.kill()
+            stderr = self._proc.stderr.read() if self._proc.stderr else ""
+            raise RuntimeError(f"stub iroh server never printed a ticket in {timeout}s:\n{stderr}")
+        return result["ticket"]
+
+    def stop(self):
+        self._proc.terminate()
+        try:
+            self._proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait(timeout=5)
+
+
+def _stacked_obs() -> dict:
+    # Gradient content (not i.i.d. noise): JPEG needs spatial correlation to
+    # compress at all — mirrors tests/test_policy_client.py's helper.
+    xx, yy = np.meshgrid(np.arange(96, dtype=np.uint8) * 2, np.arange(96, dtype=np.uint8) * 2)
+    frame0 = np.stack([xx, yy, np.full_like(xx, 32)], axis=-1)
+    frame1 = np.stack([np.full_like(xx, 200), xx[::-1], yy], axis=-1)
+    return {
+        "observation.images.cam0": np.stack([frame0, frame1]),
+        "observation.state": np.zeros((2, 2), dtype=np.float32),
+        "task": "pick",
+    }
+
+
+def test_client_metadata_and_infer():
+    srv = StubServerProcess()
+    try:
+        with IrohPolicyClient(srv.ticket) as client:
+            assert client.metadata["policy_type"] == "stub"
+            reply = client.infer(_good_obs())
+            assert reply["actions"].shape == (8, 11)
+    finally:
+        srv.stop()
+
+
+def test_client_validation_before_send():
+    # Same message as the websocket client (tests/test_policy_client.py's
+    # test_client_side_validation) — both go through the shared _obsval module.
+    srv = StubServerProcess()
+    try:
+        with IrohPolicyClient(srv.ticket) as client:
+            obs = _good_obs()
+            obs["observation.state"] = np.zeros((2, 3), dtype=np.float32)
+            with pytest.raises(ValueError, match=r"shape \[2, 3\], expected \[2, 2\]"):
+                client.infer(obs)
+    finally:
+        srv.stop()
+
+
+def test_client_server_error_raises():
+    # obs passes client-side validation (correct keys/shapes/dtypes) but the
+    # stub host rejects it server-side (--reject-task raises ObservationError
+    # on task=="reject me") — the one-line server text reaches the client as a
+    # PolicyServerError.
+    srv = StubServerProcess("--reject-task")
+    try:
+        with IrohPolicyClient(srv.ticket) as client:
+            obs = _good_obs()
+            obs["task"] = "reject me"
+            with pytest.raises(PolicyServerError, match="reject me"):
+                client.infer(obs)
+    finally:
+        srv.stop()
+
+
+def test_client_jpeg_roundtrip():
+    # host._policy.seen_batch is unreachable across the process boundary, so
+    # the echo-image stub returns the decoded cam0 per-channel mean in the
+    # action chunk. A known gradient obs (jpeg_quality=90) must round-trip to
+    # matching means within JPEG tolerance — still catches an RGB/BGR swap
+    # end-to-end across the real transport.
+    srv = StubServerProcess("--echo-image")
+    try:
+        with IrohPolicyClient(srv.ticket, jpeg_quality=90) as client:
+            obs = _stacked_obs()
+            reply = client.infer(obs)
+            assert client.last_request_bytes is not None
+            assert client.last_request_bytes < obs["observation.images.cam0"].nbytes / 5
+            returned_means = reply["actions"][0, :3]  # per-channel mean in [0,1]
+            expected = obs["observation.images.cam0"].astype(float).mean(axis=(0, 1, 2)) / 255.0
+            assert np.allclose(returned_means, expected, atol=0.02), (
+                f"channel means {returned_means} vs expected {expected} — "
+                "JPEG parity failure (possible RGB/BGR swap)"
+            )
+    finally:
+        srv.stop()
+
+
+def test_infer_timeout():
+    srv = StubServerProcess("--sleep-infer", "2.0")
+    try:
+        with IrohPolicyClient(srv.ticket, infer_timeout=0.2) as client:
+            t0 = time.monotonic()
+            with pytest.raises(PolicyServerError, match="timed out after 0.2s"):
+                client.infer(_good_obs())
+            elapsed = time.monotonic() - t0
+            assert elapsed < 1.5, f"infer() should not hang past the timeout, took {elapsed:.2f}s"
+    finally:
+        srv.stop()
+
+
+def test_open_client_dispatch(monkeypatch):
+    calls = {}
+
+    class FakeIrohClient:
+        def __init__(self, ticket, **kw):
+            calls["iroh"] = (ticket, kw)
+
+    class FakePolicyClient:
+        def __init__(self, addr, **kw):
+            calls["ws"] = (addr, kw)
+
+    monkeypatch.setattr(ficelle_client, "IrohPolicyClient", FakeIrohClient)
+    monkeypatch.setattr(ficelle_client, "PolicyClient", FakePolicyClient)
+
+    iroh_client = ficelle_client.open_client("endpointv1abcdef")
+    assert isinstance(iroh_client, FakeIrohClient)
+    assert calls["iroh"][0] == "endpointv1abcdef"
+
+    ws_client = ficelle_client.open_client("127.0.0.1:8000")
+    assert isinstance(ws_client, FakePolicyClient)
+    assert calls["ws"][0] == "127.0.0.1:8000"

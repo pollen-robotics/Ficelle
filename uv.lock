@@ -305,10 +305,12 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "iroh", marker = "extra == 'iroh'", specifier = ">=1,<2" },
     { name = "msgpack", specifier = ">=1.0" },
     { name = "numpy", specifier = ">=1.22" },
     { name = "websockets", specifier = ">=14" },
 ]
+provides-extras = ["iroh"]
 
 [[package]]
 name = "filelock"
