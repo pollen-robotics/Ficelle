@@ -382,6 +382,7 @@ class ServePyProcess:
         if "ticket" not in result:
             self._proc.kill()
             stderr = self._proc.stderr.read() if self._proc.stderr else ""
+            self._proc.wait(timeout=10)  # reap so a startup failure doesn't leak a zombie
             raise RuntimeError(f"serve.py never printed a ticket in {timeout}s:\n{stderr}")
         return result["ticket"]
 
