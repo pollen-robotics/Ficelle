@@ -166,6 +166,28 @@ on your validation set). The client soft-depends on `opencv-python`(-headless)
 or `pillow`; if neither is installed, `client.infer()` raises a one-line error
 naming the missing codec.
 
+### Bandwidth: resize-before-send
+
+To further reduce bandwidth on constrained links, pass `resize=True` to the client:
+
+```python
+client = PolicyClient("100.x.y.z", 8000, jpeg_quality=90, resize=True)
+# Observations still passed as raw uint8 numpy arrays; the client
+# downscales images to the model's own resize resolution BEFORE sending.
+# Transport-only: you still pass full-resolution frames, and the server's
+# output is unchanged. Server-negotiated: only offered when the served
+# policy resizes internally (e.g. diffusion advertises `resize_to` in
+# metadata); against policies without resize support, `resize=True` raises
+# a one-line error.
+```
+
+The combo `resize=True, jpeg_quality=90` compresses each 2-frame observation
+from ~250 KB+ to ~15–25 KB, reaching the reliable zone for packet-loss
+tolerance (~29 Hz throughput, no multi-second tail spikes under degraded links)
+as measured in cross-machine iroh sweeps. Resizing is validated action-equivalent
+to the server's own resize (offline parity: ≤0.17% of natural action variation
+with PIL `BILINEAR` / `cv2.INTER_AREA`).
+
 ## 4. Remote access over Tailscale
 
 For running the server on a GPU box and the client on a robot on a different
@@ -307,6 +329,7 @@ network + serialization overhead).
 | `ficelle: '...' has dtype ..., expected uint8/float32` | Sent e.g. `float64` state or `int32` image. | Cast client-side: images to `np.uint8`, states to `np.float32`. |
 | `PolicyServerError: server at ws://... rejected the api key — check --api_key on both sides` (raw curl/HTTP clients instead see a `403` body of `ficelle: invalid or missing api key`) | Server was started with `--api_key` but the client didn't pass a matching one (or vice versa). | Pass the same `api_key=...` to `PolicyClient(...)` as `--api_key` on the server. |
 | `ficelle: server at ws://... does not support jpeg encoding` | The server is running an older version of ficelle that predates JPEG support. | Upgrade the server to the current version, or drop `jpeg_quality` from the client. |
+| `ValueError: server ... does not advertise resize` | The served policy doesn't resize internally (e.g. pi0fast). | Drop `resize` and use `jpeg_quality` alone. |
 | Client logs `waiting for server at ...` forever | Wrong host/port, a firewall in the way, or the server is bound to a different interface than the client is reaching (e.g. server on `0.0.0.0` on a machine whose tailnet IP differs from what you passed). | Confirm the server's startup log ("serving on ws://...") matches the address the client is dialing; check firewalls; on Tailscale confirm both machines see each other with `tailscale status`. |
 | Server fails to start, error mentions `AutoProcessor` / tokenizer loading | Known `transformers` v5 + `physical-intelligence/fast` Hub packaging bug: the tokenizer repo referenced by the checkpoint's config isn't resolved correctly unless the checkpoint points at its **own** fitted tokenizer repo. | Check the checkpoint's config references its own tokenizer (e.g. `SteveNguyen/fast_tokenizer_grabette_pick3`), not a shared/generic one. |
 | Latency much higher than [§6](#6-latency-expectations) despite the server logging fast `infer_ms` | Network path, not the policy. Most commonly a Tailscale DERP relay instead of a direct connection. | Run `tailscale ping <server-ip>` — if it says `via DERP`, fix connectivity (NAT/firewall) so Tailscale can establish a direct path; see [§4](#4-remote-access-over-tailscale). |
