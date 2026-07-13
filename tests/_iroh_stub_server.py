@@ -36,6 +36,23 @@ from policy_host import PolicyHost
 from tests.test_policy_host import StubConfig, StubPolicy, identity
 
 
+class SlowFirstStubPolicy(StubPolicy):
+    """Sleeps `sleep_s` on the FIRST infer only, then serves normally — lets a
+    test time out the first request and prove the SECOND one still succeeds on
+    the same client (the connection/loop must not wedge)."""
+
+    def __init__(self, config, sleep_s: float):
+        super().__init__(config)
+        self._sleep_s = sleep_s
+        self._calls = 0
+
+    def predict_action_chunk(self, batch):
+        self._calls += 1
+        if self._calls == 1:
+            time.sleep(self._sleep_s)
+        return super().predict_action_chunk(batch)
+
+
 class RejectTaskStubPolicy(StubPolicy):
     """Passes client-side validation (metadata is identical both sides) but
     rejects a specific task server-side with a one-line ObservationError —
@@ -76,12 +93,15 @@ class EchoImageStubPolicy(StubPolicy):
 async def _main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sleep-infer", type=float, default=None)
+    parser.add_argument("--slow-first", type=float, default=None)
     parser.add_argument("--echo-image", action="store_true")
     parser.add_argument("--reject-task", action="store_true")
     args = parser.parse_args()
 
     if args.sleep_infer is not None:
         policy = SleepStubPolicy(StubConfig(), args.sleep_infer)
+    elif args.slow_first is not None:
+        policy = SlowFirstStubPolicy(StubConfig(), args.slow_first)
     elif args.echo_image:
         policy = EchoImageStubPolicy(StubConfig())
     elif args.reject_task:

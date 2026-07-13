@@ -293,6 +293,28 @@ def test_infer_timeout():
         srv.stop()
 
 
+def test_infer_recovers_after_timeout():
+    # Remote-robustness property: a timed-out request must not wedge the client.
+    # The stub sleeps 0.7s on the FIRST infer only; with infer_timeout=0.5 the
+    # first call times out, then the SECOND call on the SAME client succeeds
+    # (fresh open_bi per request; the abandoned first request doesn't wedge the
+    # background loop). Timing note: PolicyHost serializes inference under a
+    # lock, so the slow first request holds it for 0.7s; the second request's
+    # own 0.5s deadline (starting ~0.5s in, right after the first times out)
+    # therefore extends past that 0.7s lock release, so it gets served.
+    srv = StubServerProcess("--slow-first", "0.7")
+    try:
+        with IrohPolicyClient(srv.ticket, infer_timeout=0.5) as client:
+            t0 = time.monotonic()
+            with pytest.raises(PolicyServerError, match="timed out after 0.5s"):
+                client.infer(_good_obs())
+            assert time.monotonic() - t0 < 1.2
+            reply = client.infer(_good_obs())  # must not hang or time out
+            assert reply["actions"].shape == (8, 11)
+    finally:
+        srv.stop()
+
+
 def test_open_client_dispatch(monkeypatch):
     calls = {}
 
