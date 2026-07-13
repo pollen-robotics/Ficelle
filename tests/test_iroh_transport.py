@@ -336,3 +336,117 @@ def test_open_client_dispatch(monkeypatch):
     ws_client = ficelle_client.open_client("127.0.0.1:8000")
     assert isinstance(ws_client, FakePolicyClient)
     assert calls["ws"][0] == "127.0.0.1:8000"
+
+
+# ---------------------------------------------------------------------------
+# Real-checkpoint e2e over iroh: drives the REAL production entrypoint
+# (`serve.py --transport iroh`, not the stub server used above) against a
+# real diffusion checkpoint, mirroring tests/test_real_diffusion.py's
+# websocket e2e test (test_end_to_end_over_websocket) but over the iroh
+# transport. Same process-separation reasoning as the client-half tests
+# above: iroh-ffi's uniffi_set_event_loop is process-global, so the server
+# runs as a subprocess while IrohPolicyClient (its own thread + loop) runs
+# in-process. Slow (checkpoint download + load); marked `checkpoint`.
+# ---------------------------------------------------------------------------
+
+_REAL_CKPT = "SteveNguyen/diffusion_grabette_simu_release"
+_SERVE_PY = str(pathlib.Path(__file__).resolve().parent.parent / "serve.py")
+
+
+class ServePyProcess:
+    """Spawn `serve.py --transport iroh --checkpoint <checkpoint>`, block
+    until it prints its ticket. Mirrors StubServerProcess above but drives
+    the real CLI entrypoint with a real checkpoint (HF download + model load
+    happen before the ticket is printed), hence the generous default
+    timeout."""
+
+    def __init__(self, checkpoint: str, ticket_timeout: float = 120.0):
+        self._proc = subprocess.Popen(
+            [sys.executable, _SERVE_PY, "--transport", "iroh", "--checkpoint", checkpoint],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.ticket = self._read_ticket(ticket_timeout)
+
+    def _read_ticket(self, timeout: float) -> str:
+        result: dict = {}
+
+        def reader():
+            for line in self._proc.stdout:
+                if line.startswith("TICKET "):
+                    result["ticket"] = line[len("TICKET "):].strip()
+                    return
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        t.join(timeout)
+        if "ticket" not in result:
+            self._proc.kill()
+            stderr = self._proc.stderr.read() if self._proc.stderr else ""
+            raise RuntimeError(f"serve.py never printed a ticket in {timeout}s:\n{stderr}")
+        return result["ticket"]
+
+    def stop(self):
+        self._proc.terminate()
+        try:
+            self._proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait(timeout=10)
+
+
+def _gradient_frame(h: int, w: int) -> np.ndarray:
+    """One (h, w, 3) uint8 frame with spatial correlation — JPEG needs
+    gradient content (not i.i.d. noise) to compress at all, same reasoning
+    as _stacked_obs() above."""
+    xx, yy = np.meshgrid(np.linspace(0, 255, w, dtype=np.uint8),
+                         np.linspace(0, 255, h, dtype=np.uint8))
+    return np.stack([xx, yy, np.full_like(xx, 128)], axis=-1)
+
+
+def _real_ckpt_obs(meta: dict) -> dict:
+    """Synthetic observation dict matching the checkpoint's metadata: image
+    keys get stacked gradient frames (so raw-vs-jpeg size is a meaningful
+    comparison), everything else gets random floats."""
+    rng = np.random.default_rng(0)
+    obs = {"task": ""}
+    for key, spec in meta["observations"].items():
+        shape = spec["wire_shape"]
+        if spec["dtype"] == "uint8":
+            h, w = shape[-3], shape[-2]
+            obs[key] = np.broadcast_to(_gradient_frame(h, w), shape).copy()
+        else:
+            obs[key] = rng.standard_normal(shape).astype(np.float32)
+    return obs
+
+
+@pytest.mark.checkpoint
+def test_real_diffusion_checkpoint_over_iroh():
+    srv = ServePyProcess(_REAL_CKPT)
+    try:
+        with IrohPolicyClient(srv.ticket) as client:
+            meta = client.metadata
+            assert meta["policy_type"] == "diffusion"
+            assert meta["n_obs_steps"] == 2
+            assert (meta["n_action_steps"], meta["action_dim"]) == (8, 11)
+
+            obs = _real_ckpt_obs(meta)
+            reply = client.infer(obs)
+            actions = reply["actions"]
+            assert actions.shape == (8, 11)
+            assert actions.dtype == np.float32
+            assert np.isfinite(actions).all()
+            raw_bytes = client.last_request_bytes
+
+        # Fresh connection (a new ticket-dial) for the jpeg side of the
+        # comparison, same server process.
+        with IrohPolicyClient(srv.ticket, jpeg_quality=90) as jpeg_client:
+            jpeg_client.infer(obs)
+            jpeg_bytes = jpeg_client.last_request_bytes
+
+        assert raw_bytes is not None and jpeg_bytes is not None
+        assert jpeg_bytes < raw_bytes, (
+            f"jpeg request ({jpeg_bytes} bytes) should be smaller than raw "
+            f"({raw_bytes} bytes) for gradient image content"
+        )
+    finally:
+        srv.stop()

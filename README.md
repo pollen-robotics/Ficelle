@@ -72,7 +72,7 @@ serving on ws://0.0.0.0:8000
   checkpoint has `n_obs_steps=2` — see [Client usage](#3-client-usage)).
 - Line 3 is the reply shape (`n_action_steps x action_dim`) and the training
   fps, if it could be determined (see the `fps: None` row in
-  [Troubleshooting](#6-troubleshooting)).
+  [Troubleshooting](#7-troubleshooting)).
 - Line 4 confirms the address it's actually listening on — this must be
   reachable from the robot (see [Remote access over
   Tailscale](#4-remote-access-over-tailscale)).
@@ -140,7 +140,7 @@ Three rules that apply to every checkpoint:
 `client.infer()` validates your observation dict against `client.metadata`
 before sending anything over the wire, so a wrong key/shape/dtype fails
 immediately with a message naming the exact key (see
-[Troubleshooting](#6-troubleshooting)). If the connection drops (e.g. the
+[Troubleshooting](#7-troubleshooting)). If the connection drops (e.g. the
 server restarted), the next `infer()` call reconnects automatically.
 
 ### Bandwidth: JPEG encoding
@@ -198,14 +198,79 @@ public internet.
    `via DERP <relay>`, Tailscale has fallen back to relaying through a
    Tailscale-operated server (e.g. due to strict NAT/firewalls on one side),
    which silently adds ~50–200 ms of round-trip latency — see the
-   [Troubleshooting](#6-troubleshooting) table.
+   [Troubleshooting](#7-troubleshooting) table.
 
 5. Tailscale already authenticates which devices can reach the server, but
    pass `--api_key <secret>` on the server (and the matching `api_key=` on
    the client) as defense in depth — it costs nothing and stops any other
    device on the tailnet from calling your policy server.
 
-## 5. Latency expectations
+## 5. iroh transport (zero-config remote)
+
+Tailscale ([§4](#4-remote-access-over-tailscale)) needs both machines joined
+to a tailnet ahead of time. `--transport iroh` is the zero-config
+alternative: no VPN, no account, no shared network to set up — the server
+prints a one-line **ticket** that fully describes how to reach it, and the
+client dials that ticket directly. Under the hood it's QUIC with iroh's
+built-in NAT hole-punching (see `experiments/iroh_probe/` for the proof of
+concept this is built on).
+
+Start the server with `--transport iroh` instead of the default:
+
+```bash
+uv run python serve.py --checkpoint SteveNguyen/test_pick_mustard_200_diffusion-best --transport iroh
+```
+
+It logs the usual four lines, then a ticket instead of a `ws://` address:
+
+```
+============================================================
+iroh ticket: endpointv1...
+============================================================
+```
+
+Give that ticket to the client — `open_client` dispatches on its shape (an
+iroh ticket vs. a `host:port` string), so the same call site works for
+either transport:
+
+```python
+from ficelle_client import open_client
+
+client = open_client("endpointv1...", jpeg_quality=90)  # ticket -> IrohPolicyClient
+# client = open_client("100.x.y.z:8000")                # host:port -> PolicyClient (unchanged)
+print(client.metadata["observations"])
+reply = client.infer(obs)                                # same .infer() contract either way
+```
+
+`--policy_addr` on GRABETTE's `evaluate.py` accepts either form unchanged for
+the same reason: pass a ticket or a `host:port` and it does the right thing.
+
+Install the client's iroh extra (the plain `pip install ficelle-client` from
+[§3](#3-client-usage) does not pull in `iroh`):
+
+```bash
+pip install "ficelle-client[iroh] @ git+<this-repo-url>#subdirectory=client"
+# from a local checkout instead:
+pip install "./client[iroh]"
+```
+
+Notes:
+
+- **First connect may take a moment.** iroh tries a direct (hole-punched)
+  path first and falls back to a relay if NAT traversal fails; the very
+  first request after construction can be slower while that negotiation
+  settles. Subsequent requests reuse the established connection.
+- **Relays**: by default iroh uses n0's public relay infrastructure only as
+  a fallback/rendezvous — pass `--relay-url <url>` on the server (and
+  `relay_url=<url>` on `open_client`/`IrohPolicyClient`) to point both ends
+  at a self-hosted relay instead.
+- **`infer_timeout`**: `IrohPolicyClient(ticket, infer_timeout=5.0)` (default
+  5s) bounds how long a single `.infer()` call waits before raising
+  `PolicyServerError` — a degraded link or a stuck server otherwise hangs
+  the caller forever. A timed-out request doesn't wedge the client: the next
+  `.infer()` call still works.
+
+## 6. Latency expectations
 
 Measured on real checkpoints (server infer time is what
 `reply["server_timing"]["infer_ms"]` reports; RTT is what
@@ -232,7 +297,7 @@ This prints, per request, round-trip time and the server's self-reported
 infer time, then a p50/p95 summary and `rtt - infer` (an estimate of your
 network + serialization overhead).
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -244,10 +309,13 @@ network + serialization overhead).
 | `ficelle: server at ws://... does not support jpeg encoding` | The server is running an older version of ficelle that predates JPEG support. | Upgrade the server to the current version, or drop `jpeg_quality` from the client. |
 | Client logs `waiting for server at ...` forever | Wrong host/port, a firewall in the way, or the server is bound to a different interface than the client is reaching (e.g. server on `0.0.0.0` on a machine whose tailnet IP differs from what you passed). | Confirm the server's startup log ("serving on ws://...") matches the address the client is dialing; check firewalls; on Tailscale confirm both machines see each other with `tailscale status`. |
 | Server fails to start, error mentions `AutoProcessor` / tokenizer loading | Known `transformers` v5 + `physical-intelligence/fast` Hub packaging bug: the tokenizer repo referenced by the checkpoint's config isn't resolved correctly unless the checkpoint points at its **own** fitted tokenizer repo. | Check the checkpoint's config references its own tokenizer (e.g. `SteveNguyen/fast_tokenizer_grabette_pick3`), not a shared/generic one. |
-| Latency much higher than [§5](#5-latency-expectations) despite the server logging fast `infer_ms` | Network path, not the policy. Most commonly a Tailscale DERP relay instead of a direct connection. | Run `tailscale ping <server-ip>` — if it says `via DERP`, fix connectivity (NAT/firewall) so Tailscale can establish a direct path; see [§4](#4-remote-access-over-tailscale). |
+| Latency much higher than [§6](#6-latency-expectations) despite the server logging fast `infer_ms` | Network path, not the policy. Most commonly a Tailscale DERP relay instead of a direct connection. | Run `tailscale ping <server-ip>` — if it says `via DERP`, fix connectivity (NAT/firewall) so Tailscale can establish a direct path; see [§4](#4-remote-access-over-tailscale). |
 | Metadata shows `"fps": None` | The checkpoint has no `train_config.json` (or it points at a training dataset that's unreachable), so ficelle couldn't look up the training frame rate. | Harmless — `fps` is informational only and isn't used by the server or client for anything. |
+| `ValueError: iroh transport needs the extra: pip install 'ficelle-client[iroh]'` | `open_client`/`IrohPolicyClient` was called with a ticket but the `iroh` package isn't installed. | Install the extra — see [§5](#5-iroh-transport-zero-config-remote). |
+| iroh client raises an error building the endpoint from the ticket string (malformed/truncated ticket) | The ticket was cut off, mistyped, or copy-pasted from the wrong log line — it's a long opaque string and easy to truncate. | Re-copy the full `iroh ticket: endpointv1...` line the server logs on startup; don't split it across lines. |
+| `PolicyServerError: inference timed out after ...s (link degraded or server stuck)` | Either NAT hole-punching fell back to a slow path, the server is overloaded/stuck, or `infer_timeout` is too tight for this link. | Retry (the client isn't wedged — the next `.infer()` still works); if it persists, raise `infer_timeout`, check the server log, or set `--relay-url` to a closer self-hosted relay. |
 
-## 7. Development
+## 8. Development
 
 ```bash
 uv run pytest              # fast suite: no checkpoint download, no GPU needed
@@ -266,7 +334,12 @@ Layout:
   one-line `ficelle: ...` message sent back to the client instead of a stack
   trace.
 - `client/ficelle_client/` — the pip-installable client package:
-  `policy_client.py` (`PolicyClient`, `PolicyServerError`) and
+  `policy_client.py` (`PolicyClient`, `PolicyServerError`),
+  `iroh_client.py` (`IrohPolicyClient`, the `[iroh]` extra), `__init__.py`
+  (`open_client`, dispatching on ticket vs. `host:port`), and
   `msgpack_numpy.py` (the vendored, pickle-free msgpack codec shared by both
   client and server).
-- `examples/random_client.py` — the latency probe used in [§5](#5-latency-expectations).
+- `examples/random_client.py` — the latency probe used in [§6](#6-latency-expectations).
+- `iroh_transport.py` — iroh transport (`IrohPolicyServer`), the alternative
+  to `serve.py`'s websocket transport described in
+  [§5](#5-iroh-transport-zero-config-remote).

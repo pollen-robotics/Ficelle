@@ -150,6 +150,10 @@ def main() -> None:
                 logger.info("=" * 60)
                 logger.info(f"iroh ticket: {server.ticket()}")
                 logger.info("=" * 60)
+                # Parseable line for scripts/tests (mirrors tests/_iroh_stub_server.py):
+                # the log lines above go through logging's formatter, so a
+                # machine reader would need to parse timestamps/levels too.
+                print(f"TICKET {server.ticket()}", flush=True)
                 await run_task
 
             asyncio.run(_run())
