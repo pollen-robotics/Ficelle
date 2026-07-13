@@ -15,6 +15,8 @@ serves forever until terminated. Modes:
   --echo-image      reply's actions carry the decoded cam0 mean per channel, so
                     the client can assert JPEG pixel-parity across the process
                     boundary (host._policy.seen_batch is unreachable here)
+  --resize          serve over ResizeStubConfig (advertises resize_to) instead
+                    of the plain StubConfig, for the client-side resize test
 """
 
 import argparse
@@ -33,7 +35,7 @@ import torch
 from errors import ObservationError
 from iroh_transport import IrohPolicyServer
 from policy_host import PolicyHost
-from tests.test_policy_host import StubConfig, StubPolicy, identity
+from tests.test_policy_host import ResizeStubConfig, StubConfig, StubPolicy, identity
 
 
 class SlowFirstStubPolicy(StubPolicy):
@@ -96,6 +98,7 @@ async def _main() -> None:
     parser.add_argument("--slow-first", type=float, default=None)
     parser.add_argument("--echo-image", action="store_true")
     parser.add_argument("--reject-task", action="store_true")
+    parser.add_argument("--resize", action="store_true")
     args = parser.parse_args()
 
     if args.sleep_infer is not None:
@@ -106,6 +109,8 @@ async def _main() -> None:
         policy = EchoImageStubPolicy(StubConfig())
     elif args.reject_task:
         policy = RejectTaskStubPolicy(StubConfig())
+    elif args.resize:
+        policy = StubPolicy(ResizeStubConfig())
     else:
         policy = StubPolicy(StubConfig())
     host = PolicyHost(policy, identity, identity,

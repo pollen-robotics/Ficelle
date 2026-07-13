@@ -293,6 +293,22 @@ def test_infer_timeout():
         srv.stop()
 
 
+def test_client_resize_shrinks_and_infers():
+    # mirrors tests/test_policy_client.py's test_resize_shrinks_and_infers:
+    # ResizeStubConfig advertises resize_to=[48, 48]; caller keeps passing
+    # full (2, 96, 96, 3) frames, the client downscales+jpeg-encodes before
+    # send over the real iroh transport (subprocess stub server, --resize).
+    srv = StubServerProcess("--resize")
+    try:
+        with IrohPolicyClient(srv.ticket, resize=True, jpeg_quality=90) as client:
+            obs = _stacked_obs()
+            reply = client.infer(obs)
+            assert reply["actions"].shape == (8, 11)
+            assert client.last_request_bytes < obs["observation.images.cam0"].nbytes / 10
+    finally:
+        srv.stop()
+
+
 def test_infer_recovers_after_timeout():
     # Remote-robustness property: a timed-out request must not wedge the client.
     # The stub sleeps 0.7s on the FIRST infer only; with infer_timeout=0.5 the

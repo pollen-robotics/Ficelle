@@ -14,12 +14,15 @@ proven iroh 1.0 API this mirrors).
 
 import asyncio
 import concurrent.futures
+import logging
 import threading
 
 import numpy as np
 
 from ficelle_client import _obsval, msgpack_numpy
 from ficelle_client.policy_client import PolicyServerError
+
+logger = logging.getLogger("ficelle.client")
 
 # Mirrors iroh_transport.py's protocol constants (repo root, server side) —
 # keep these 4 + ALPN in sync with that file by hand; do not import it here.
@@ -39,7 +42,8 @@ class IrohPolicyClient:
     """
 
     def __init__(self, ticket: str, jpeg_quality: int | None = None,
-                 infer_timeout: float = 5.0, relay_url: str | None = None):
+                 infer_timeout: float = 5.0, relay_url: str | None = None,
+                 resize: bool = False):
         try:
             import iroh
         except ImportError:
@@ -50,6 +54,8 @@ class IrohPolicyClient:
         self._infer_timeout = infer_timeout
         self._packer = msgpack_numpy.Packer()
         self._encode_frame = None
+        self._resize = resize
+        self._resizer = None
         self.last_request_bytes: int | None = None
         self._ep = None
         self._conn = None
@@ -57,6 +63,8 @@ class IrohPolicyClient:
         if jpeg_quality is not None:
             _obsval.check_jpeg_quality(jpeg_quality)
             self._encode_frame = _obsval.pick_jpeg_encoder(jpeg_quality)
+        if resize:
+            self._resizer = _obsval.pick_resizer()
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -71,6 +79,16 @@ class IrohPolicyClient:
             raise ValueError(
                 "server does not support jpeg encoding (metadata lacks 'jpeg' in "
                 "image_encodings) — upgrade the server or drop jpeg_quality"
+            )
+        if resize and not _obsval.resolve_resize(self.metadata):
+            self.close()
+            raise ValueError(
+                "server does not advertise resize (its policy doesn't resize internally)"
+            )
+        if resize and jpeg_quality is None:
+            logger.info(
+                "resize without jpeg_quality: raw resized frames are still large "
+                "over the network — jpeg_quality=90 is the recommended combo"
             )
 
     def _run_loop(self) -> None:
@@ -109,6 +127,8 @@ class IrohPolicyClient:
         """One observation dict in, one action chunk out. See server metadata
         (self.metadata['observations']) for the expected keys/shapes/dtypes."""
         _obsval.validate_obs(self.metadata, obs)
+        if self._resize:
+            obs = _obsval.resize_frames(obs, self.metadata["observations"], self._resizer)
         if self._encode_frame is not None:
             obs = _obsval.encode_jpeg(self.metadata, obs, self._encode_frame)
         payload = bytes([OP_INFER]) + self._packer.pack(obs)

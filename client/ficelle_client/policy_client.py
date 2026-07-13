@@ -31,7 +31,8 @@ class PolicyClient:
     """
 
     def __init__(self, host: str, port: int | None = 8000, api_key: str | None = None,
-                 connect_retry_s: float = 5.0, jpeg_quality: int | None = None):
+                 connect_retry_s: float = 5.0, jpeg_quality: int | None = None,
+                 resize: bool = False):
         self._uri = host if host.startswith("ws") else f"ws://{host}"
         if port is not None and ":" not in self._uri.split("//", 1)[-1]:
             self._uri += f":{port}"
@@ -40,15 +41,29 @@ class PolicyClient:
         self._packer = msgpack_numpy.Packer()
         self._jpeg_quality = jpeg_quality
         self._encode_frame = None
+        self._resize = resize
+        self._resizer = None
         self.last_request_bytes: int | None = None
         if jpeg_quality is not None:
             self._check_jpeg_quality(jpeg_quality)
             self._encode_frame = self._pick_jpeg_encoder(jpeg_quality)
+        if resize:
+            self._resizer = _obsval.pick_resizer()
         self._ws, self.metadata = self._connect()
         if jpeg_quality is not None and "jpeg" not in self.metadata.get("image_encodings", ["raw"]):
             raise ValueError(
                 f"server at {self._uri} does not support jpeg encoding "
                 "(metadata lacks 'jpeg' in image_encodings) — upgrade the server or drop jpeg_quality"
+            )
+        if resize and not _obsval.resolve_resize(self.metadata):
+            raise ValueError(
+                f"server at {self._uri} does not advertise resize "
+                "(its policy doesn't resize internally)"
+            )
+        if resize and jpeg_quality is None:
+            logger.info(
+                "resize without jpeg_quality: raw resized frames are still large "
+                "over the network — jpeg_quality=90 is the recommended combo"
             )
 
     @staticmethod
@@ -87,6 +102,8 @@ class PolicyClient:
         """One observation dict in, one action chunk out. See server metadata
         (self.metadata['observations']) for the expected keys/shapes/dtypes."""
         self._validate(obs)
+        if self._resize:
+            obs = self._resize_frames(obs)
         if self._encode_frame is not None:
             obs = self._encode_jpeg(obs)
         payload = self._packer.pack(obs)
@@ -110,6 +127,12 @@ class PolicyClient:
 
     def _validate(self, obs: dict) -> None:
         _obsval.validate_obs(self.metadata, obs)
+
+    def _resize_frames(self, obs: dict) -> dict:
+        """Downscale each image key the server advertised resize_to for,
+        to that resolution — transport-only, runs after validation against
+        the caller's full-res frames and before any JPEG encode."""
+        return _obsval.resize_frames(obs, self.metadata["observations"], self._resizer)
 
     def _encode_jpeg(self, obs: dict) -> dict:
         """Encode validated raw image arrays to per-frame JPEG bytes (oldest

@@ -4,7 +4,7 @@ import pytest
 from ficelle_client import PolicyClient, PolicyServerError
 from policy_host import PolicyHost
 from tests.conftest import FakeHost, ServerThread
-from tests.test_policy_host import StubConfig, StubPolicy, identity
+from tests.test_policy_host import ResizeStubConfig, StubConfig, StubPolicy, identity
 
 
 def _good_obs(task=""):
@@ -88,6 +88,11 @@ def _stub_policy_host():
                       checkpoint="stub/ckpt", device="cpu", fps=None)
 
 
+def _resize_stub_policy_host():
+    return PolicyHost(StubPolicy(ResizeStubConfig()), identity, identity,
+                      checkpoint="stub/resize-ckpt", device="cpu", fps=None)
+
+
 def _stacked_obs():
     # Gradient content (not i.i.d. noise): JPEG needs spatial correlation to
     # compress at all, so this is what makes the "big win or bust" size
@@ -144,3 +149,43 @@ def test_jpeg_refused_when_server_is_raw_only(fake_host, server):
 def test_jpeg_quality_validated(quality):
     with pytest.raises(ValueError, match="jpeg_quality must be an integer between 1 and 100"):
         PolicyClient.__new__(PolicyClient)._check_jpeg_quality(quality)
+
+
+def test_resize_shrinks_and_infers():
+    # ResizeStubConfig advertises resize_to=[48, 48]; caller keeps passing
+    # full (2, 96, 96, 3) frames per the unchanged caller contract, the
+    # client downscales+jpeg-encodes before send.
+    host = _resize_stub_policy_host()
+    st = ServerThread(host)
+    try:
+        with PolicyClient("127.0.0.1", st.port, resize=True, jpeg_quality=90) as client:
+            obs = _stacked_obs()
+            reply = client.infer(obs)
+            assert reply["actions"].shape == (8, 11)
+            assert client.last_request_bytes < obs["observation.images.cam0"].nbytes / 10
+    finally:
+        st.stop()
+
+
+def test_resize_refused_when_unsupported():
+    # plain StubConfig has no resize_shape -> no resize_to advertised
+    st = ServerThread(_stub_policy_host())
+    try:
+        with pytest.raises(ValueError, match="does not advertise resize"):
+            PolicyClient("127.0.0.1", st.port, resize=True)
+    finally:
+        st.stop()
+
+
+def test_resize_caller_contract_unchanged():
+    # a wrong full-frame shape must still raise the same validation error,
+    # BEFORE any resize is attempted
+    st = ServerThread(_resize_stub_policy_host())
+    try:
+        with PolicyClient("127.0.0.1", st.port, resize=True) as client:
+            bad = _stacked_obs()
+            bad["observation.state"] = np.zeros((2, 3), dtype=np.float32)
+            with pytest.raises(ValueError, match=r"shape \[2, 3\], expected \[2, 2\]"):
+                client.infer(bad)
+    finally:
+        st.stop()
