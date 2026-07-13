@@ -83,6 +83,8 @@ class IrohPolicyServer:
         self._relay_url = relay_url
         self._ep: iroh.Endpoint | None = None
         self._ready = asyncio.Event()
+        self._bind_error: Exception | None = None
+        self._tasks: set[asyncio.Task] = set()  # strong refs so background tasks aren't GC'd mid-flight
 
     def _options(self) -> "iroh.EndpointOptions":
         kwargs = {"preset": iroh.preset_n0(), "alpns": [ALPN]}
@@ -91,8 +93,12 @@ class IrohPolicyServer:
         return iroh.EndpointOptions(**kwargs)
 
     async def wait_ready(self) -> None:
-        """Resolve once the endpoint is bound and addr()/ticket() are valid."""
+        """Resolve once the endpoint is bound and addr()/ticket() are valid, or
+        raise if startup failed (bind errors would otherwise hang this forever,
+        since _ready was never set)."""
         await self._ready.wait()
+        if self._bind_error is not None:
+            raise self._bind_error
 
     def addr(self):
         return self._ep.addr()
@@ -100,9 +106,21 @@ class IrohPolicyServer:
     def ticket(self) -> str:
         return str(iroh.EndpointTicket.from_addr(self._ep.addr()))
 
+    def _spawn(self, coro) -> None:
+        """Schedule a background task, keeping a strong reference so it can't
+        be garbage-collected mid-flight (asyncio only holds a weak ref)."""
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
     async def run(self) -> None:
         _set_event_loop()
-        self._ep = await iroh.Endpoint.bind(self._options())
+        try:
+            self._ep = await iroh.Endpoint.bind(self._options())
+        except Exception as e:
+            self._bind_error = e
+            self._ready.set()
+            raise
         self._ready.set()
         logger.info(f"iroh node id: {self._ep.id()}")
         logger.info(f"iroh ticket:  {self.ticket()}")
@@ -110,7 +128,7 @@ class IrohPolicyServer:
             incoming = await self._ep.accept_next()
             if incoming is None:
                 break
-            asyncio.ensure_future(self._serve_connection(incoming))
+            self._spawn(self._serve_connection(incoming))
 
     async def _serve_connection(self, incoming) -> None:
         try:
@@ -122,6 +140,6 @@ class IrohPolicyServer:
         try:
             while True:
                 bi = await conn.accept_bi()
-                asyncio.ensure_future(handle_stream(bi, self._policy_host))
+                self._spawn(handle_stream(bi, self._policy_host))
         except Exception:  # noqa: BLE001 — connection closed ends the loop, same as the probe
             logger.info(f"iroh connection from {conn.remote_id()} closed")

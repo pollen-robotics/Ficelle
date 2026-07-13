@@ -9,7 +9,7 @@ import iroh
 import numpy as np
 import pytest
 
-from iroh_transport import ALPN, OP_INFER, OP_META, ST_ERR, ST_OK, IrohPolicyServer
+from iroh_transport import ALPN, MAX_FRAME, OP_INFER, OP_META, ST_ERR, ST_OK, IrohPolicyServer
 from ficelle_client import msgpack_numpy
 from policy_host import PolicyHost
 from tests.test_policy_host import StubConfig, StubPolicy, identity
@@ -50,13 +50,21 @@ async def _request(server: IrohPolicyServer, payload: bytes) -> bytes:
         send, recv = bi.send(), bi.recv()
         await send.write_all(payload)
         await send.finish()
-        return await recv.read_to_end(8_000_000)
+        return await recv.read_to_end(MAX_FRAME)
     finally:
         await client_ep.close()
 
 
 async def _run_against_server(payload: bytes) -> bytes:
-    """Start a fresh IrohPolicyServer, issue one request, tear down."""
+    """Start a fresh IrohPolicyServer, issue one request, tear down.
+
+    Note: IrohPolicyServer._options() always binds with iroh.preset_n0()
+    (n0 public relays + discovery enabled) — it has no disable knob, only a
+    relay_url override for custom relays. This bind call itself does not
+    require live connectivity (verified: it succeeds offline), and the
+    client dials server.addr() directly over loopback, so the request/reply
+    exchanged in this test never touches the network or n0's relays.
+    """
     server = IrohPolicyServer(_stub_host(), relay_url=None)
     server_task = asyncio.ensure_future(server.run())
     try:
@@ -103,6 +111,21 @@ def test_infer_bad_obs_returns_status_err_one_line():
         assert text.startswith("ficelle: ")
         assert "\n" not in text
         assert "observation.state" in text
+
+    asyncio.run(body())
+
+
+def test_bind_failure_surfaces():
+    """A startup failure (here: an invalid relay_url, rejected by iroh while
+    building EndpointOptions before bind) must raise out of wait_ready(),
+    not hang it forever — _ready has to be set on the failure path too."""
+    async def body():
+        server = IrohPolicyServer(_stub_host(), relay_url="not a url")
+        server_task = asyncio.ensure_future(server.run())
+        with pytest.raises(iroh.iroh_ffi.IrohError):
+            await server.wait_ready()
+        with pytest.raises(iroh.iroh_ffi.IrohError):
+            await server_task
 
     asyncio.run(body())
 
