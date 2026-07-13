@@ -124,6 +124,12 @@ class PolicyHost:
             if feat.type is FeatureType.VISUAL:
                 c, h, w = feat.shape
                 spec[name] = {"kind": "image", "dtype": "uint8", "frame_shape": [h, w, c]}
+                resize_shape = getattr(cfg, "resize_shape", None)
+                if resize_shape:
+                    # server-negotiated resize (diffusion-like policies only,
+                    # selected via resize_shape); the model's own Resize turns
+                    # resize_to -> resize_shape into a no-op
+                    spec[name]["resize_to"] = list(resize_shape)
             else:
                 spec[name] = {"kind": "state", "dtype": "float32", "frame_shape": list(feat.shape)}
         for s in spec.values():
@@ -208,6 +214,18 @@ class PolicyHost:
             decoded[key] = np.stack(frames) if self._n_obs_steps > 1 else frames[0]
         return decoded
 
+    def _accepted_shapes(self, s: dict) -> list[list[int]]:
+        """Per-key list of acceptable WIRE shapes. Images may arrive at the
+        full frame_shape or, when the server advertises resize_to, at that
+        resolution instead — the model's own Resize turns resize_to->its
+        own input size into a no-op, so either is fed through unchanged."""
+        frames = [s["frame_shape"]]
+        if s["kind"] == "image" and s.get("resize_to"):
+            frames.append([*s["resize_to"], s["frame_shape"][-1]])
+        if self._n_obs_steps > 1:
+            return [[self._n_obs_steps] + f for f in frames]
+        return [list(f) for f in frames]
+
     def _validate(self, obs: dict) -> None:
         spec = self._obs_spec
         if "task" in obs and not isinstance(obs["task"], str):
@@ -225,11 +243,13 @@ class PolicyHost:
             arr = obs[key]
             if not isinstance(arr, np.ndarray):
                 raise ObservationError(f"'{key}' must be a numpy array, got {type(arr).__name__}")
-            if list(arr.shape) != s["wire_shape"]:
+            accepted = self._accepted_shapes(s)
+            if list(arr.shape) not in accepted:
                 hint = (f" ({self._n_obs_steps} frames stacked oldest-first)"
                         if self._n_obs_steps > 1 else "")
+                expected = " or ".join(str(a) for a in accepted)
                 raise ObservationError(
-                    f"'{key}' has shape {list(arr.shape)}, expected {s['wire_shape']}{hint}"
+                    f"'{key}' has shape {list(arr.shape)}, expected {expected}{hint}"
                 )
             if str(arr.dtype) != s["dtype"]:
                 raise ObservationError(f"'{key}' has dtype {arr.dtype}, expected {s['dtype']}")

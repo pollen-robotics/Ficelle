@@ -37,6 +37,13 @@ class StubPolicy:
                            self.config.output_features["action"].shape[0])
 
 
+class ResizeStubConfig(StubConfig):
+    """Diffusion-like config: exposes resize_shape, so the server advertises
+    resize_to for image keys (StubPolicy ignores pixel dims either way)."""
+
+    resize_shape = [48, 48]
+
+
 def identity(x):
     return x
 
@@ -45,6 +52,12 @@ def identity(x):
 def host():
     return PolicyHost(StubPolicy(StubConfig()), identity, identity,
                       checkpoint="stub/ckpt", device="cpu", fps=None)
+
+
+@pytest.fixture
+def resize_host():
+    return PolicyHost(StubPolicy(ResizeStubConfig()), identity, identity,
+                      checkpoint="stub/resize-ckpt", device="cpu", fps=None)
 
 
 def _good_obs():
@@ -123,6 +136,39 @@ def test_metadata(host):
     state = m["observations"]["observation.state"]
     assert state == {"kind": "state", "dtype": "float32",
                      "frame_shape": [2], "wire_shape": [2, 2]}
+
+
+def test_metadata_advertises_resize_to(resize_host, host):
+    cam = resize_host.metadata["observations"]["observation.images.cam0"]
+    assert cam["resize_to"] == [48, 48]
+    state = resize_host.metadata["observations"]["observation.state"]
+    assert state.get("resize_to") is None
+    # plain StubConfig has no resize_shape -> no resize_to advertised at all
+    assert "resize_to" not in host.metadata["observations"]["observation.images.cam0"]
+
+
+def test_infer_accepts_resized_frames(resize_host):
+    obs = _good_obs()
+    obs["observation.images.cam0"] = np.zeros((2, 48, 48, 3), dtype=np.uint8)
+    reply = resize_host.infer(obs)
+    assert reply["actions"].shape == (8, 11)
+    seen = resize_host._policy.seen_batch["observation.images.cam0"]
+    assert tuple(seen.shape) == (1, 2, 3, 48, 48)
+
+
+def test_infer_still_accepts_full_frames(resize_host):
+    reply = resize_host.infer(_good_obs())
+    assert reply["actions"].shape == (8, 11)
+    seen = resize_host._policy.seen_batch["observation.images.cam0"]
+    assert tuple(seen.shape) == (1, 2, 3, 96, 96)
+
+
+def test_resized_wrong_dims_rejected(resize_host):
+    obs = _good_obs()
+    obs["observation.images.cam0"] = np.zeros((2, 50, 50, 3), dtype=np.uint8)
+    with pytest.raises(ObservationError, match=r"cam0.*96, 96, 3.*48, 48, 3") as excinfo:
+        resize_host.infer(obs)
+    assert "\n" not in str(excinfo.value)
 
 
 def test_infer_stacks_frames_and_returns_chunk(host):
