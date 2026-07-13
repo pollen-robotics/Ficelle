@@ -48,8 +48,8 @@ async def handle_stream(bi, policy_host) -> None:
     like an iroh BiStream, and a policy_host with .metadata/.infer().
     """
     recv, send = bi.recv(), bi.send()
-    req = await recv.read_to_end(MAX_FRAME)
     try:
+        req = await recv.read_to_end(MAX_FRAME)
         if not req:
             raise ObservationError("empty request")
         op, payload = req[0], req[1:]
@@ -67,6 +67,19 @@ async def handle_stream(bi, policy_host) -> None:
         await send.write_all(bytes([ST_OK]) + msgpack_numpy.packb(result))
     except ObservationError as e:
         await send.write_all(bytes([ST_ERR]) + f"ficelle: {e}".encode())
+    except iroh.iroh_ffi.IrohError as e:
+        # read_to_end(MAX_FRAME) raises this (message() == "TooLong") when the
+        # client's request exceeds the cap — report it like any other bad
+        # request instead of falling into the generic internal-error branch.
+        if e.message() == "TooLong":
+            await send.write_all(
+                bytes([ST_ERR])
+                + "ficelle: request too large (limit 8MB) — enable jpeg_quality/resize "
+                  "to shrink observations".encode()
+            )
+        else:
+            logger.exception("internal error handling iroh stream")
+            await send.write_all(bytes([ST_ERR]) + f"ficelle: internal server error ({type(e).__name__})".encode())
     except Exception as e:  # noqa: BLE001 — protect the accept loop, report to client
         logger.exception("internal error handling iroh stream")
         await send.write_all(bytes([ST_ERR]) + f"ficelle: internal server error ({type(e).__name__})".encode())
@@ -111,7 +124,18 @@ class IrohPolicyServer:
         be garbage-collected mid-flight (asyncio only holds a weak ref)."""
         task = asyncio.ensure_future(coro)
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        """Drop the strong ref, and log any exception the task raised so it
+        isn't silently swallowed (also silences asyncio's cosmetic "Task
+        exception was never retrieved" warning)."""
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("background iroh task failed", exc_info=exc)
 
     async def run(self) -> None:
         _set_event_loop()

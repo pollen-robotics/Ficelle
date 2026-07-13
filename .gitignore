@@ -9,6 +9,5 @@ wheels/
 # Virtual environments
 .venv
 .superpowers/
-.claude/settings.json
 .claude/*
 *.~undo-tree~

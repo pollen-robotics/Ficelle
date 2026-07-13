@@ -13,7 +13,9 @@ import numpy as np
 
 
 def check_jpeg_quality(quality) -> None:
-    if not isinstance(quality, int) or not 1 <= quality <= 100:
+    # bool is an int subclass (True == 1), which would otherwise silently
+    # pass as quality=1 — reject it explicitly.
+    if not isinstance(quality, int) or isinstance(quality, bool) or not 1 <= quality <= 100:
         raise ValueError(f"jpeg_quality must be an integer between 1 and 100, got {quality!r}")
 
 

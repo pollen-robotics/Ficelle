@@ -119,6 +119,10 @@ def main() -> None:
     parser.add_argument("--relay-url", default=None,
                         help="iroh transport only: self-hosted relay URL (else n0 public relays)")
     args = parser.parse_args()
+    if args.transport == "iroh" and args.api_key is not None:
+        parser.error("--api_key is not supported with --transport iroh — access is controlled "
+                     "by possession of the ticket; keep the ticket secret and run over a "
+                     "trusted/private network")
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -139,7 +143,8 @@ def main() -> None:
                 f"training fps: {meta['fps']}")
     try:
         if args.transport == "iroh":
-            # deferred so websocket-only users don't need iroh installed
+            # iroh is a required server dependency (see pyproject.toml); this
+            # import is only deferred to keep --help / websocket startup light
             from iroh_transport import IrohPolicyServer
 
             server = IrohPolicyServer(host_obj, relay_url=args.relay_url)

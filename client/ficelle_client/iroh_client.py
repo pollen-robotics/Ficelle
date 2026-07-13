@@ -33,12 +33,18 @@ ST_OK = 0x00
 ST_ERR = 0x01
 MAX_FRAME = 8_000_000
 
+_CONNECT_TIMEOUT_S = 30.0
+
 
 class IrohPolicyClient:
     """Connects to a ficelle server over iroh (QUIC + NAT hole-punching),
     reads its metadata, then serves .infer(obs) -> {"actions": (n_action_steps,
     action_dim) float32, "server_timing": {...}} — the same contract as
     PolicyClient (websocket transport), just over a different wire.
+
+    Only ONE IrohPolicyClient (or one iroh endpoint) may be live per process:
+    iroh-ffi's uniffi event loop is process-global, so a second concurrent one
+    registering itself makes the second registration win and stalls the first.
     """
 
     def __init__(self, ticket: str, jpeg_quality: int | None = None,
@@ -70,7 +76,13 @@ class IrohPolicyClient:
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
         try:
-            self.metadata = self._call(self._aconnect(ticket, relay_url))
+            self.metadata = self._call(self._aconnect(ticket, relay_url), timeout=_CONNECT_TIMEOUT_S)
+        except concurrent.futures.TimeoutError:
+            self.close()
+            raise PolicyServerError(
+                f"could not connect to the iroh server within {_CONNECT_TIMEOUT_S:.0f}s — "
+                "check the ticket is current and the server is running"
+            ) from None
         except Exception:
             self.close()
             raise

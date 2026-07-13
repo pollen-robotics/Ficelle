@@ -39,7 +39,6 @@ class PolicyClient:
         self._api_key = api_key
         self._connect_retry_s = connect_retry_s
         self._packer = msgpack_numpy.Packer()
-        self._jpeg_quality = jpeg_quality
         self._encode_frame = None
         self._resize = resize
         self._resizer = None
@@ -51,11 +50,13 @@ class PolicyClient:
             self._resizer = _obsval.pick_resizer()
         self._ws, self.metadata = self._connect()
         if jpeg_quality is not None and "jpeg" not in self.metadata.get("image_encodings", ["raw"]):
+            self._ws.close()
             raise ValueError(
                 f"server at {self._uri} does not support jpeg encoding "
                 "(metadata lacks 'jpeg' in image_encodings) — upgrade the server or drop jpeg_quality"
             )
         if resize and not _obsval.resolve_resize(self.metadata):
+            self._ws.close()
             raise ValueError(
                 f"server at {self._uri} does not advertise resize "
                 "(its policy doesn't resize internally)"

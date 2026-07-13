@@ -136,6 +136,20 @@ def test_bind_failure_surfaces():
     asyncio.run(body())
 
 
+def test_wire_constants_match_client():
+    """Guards the hand-synced wire contract: ficelle_client/iroh_client.py
+    re-declares ALPN/opcodes/status/MAX_FRAME instead of importing them from
+    this module (it must not import iroh_transport.py — see that module's
+    docstring, it pulls in torch-adjacent server deps). If the two ever drift,
+    client and server silently talk past each other."""
+    from ficelle_client import iroh_client
+
+    for name in ("ALPN", "OP_META", "OP_INFER", "ST_OK", "ST_ERR", "MAX_FRAME"):
+        server_val = globals()[name]
+        client_val = getattr(iroh_client, name)
+        assert server_val == client_val, f"{name}: server={server_val!r} client={client_val!r}"
+
+
 def test_unknown_opcode_errors():
     async def body():
         reply = await _run_against_server(bytes([0x09]))
@@ -445,6 +459,12 @@ def test_real_diffusion_checkpoint_over_iroh():
             assert meta["policy_type"] == "diffusion"
             assert meta["n_obs_steps"] == 2
             assert (meta["n_action_steps"], meta["action_dim"]) == (8, 11)
+            # guards against a lerobot attr rename (resize_shape) silently
+            # disabling resize for this checkpoint without any test noticing
+            image_specs = [s for s in meta["observations"].values() if s["kind"] == "image"]
+            assert image_specs and any(s.get("resize_to") for s in image_specs), (
+                "expected at least one image observation to advertise resize_to"
+            )
 
             obs = _real_ckpt_obs(meta)
             reply = client.infer(obs)

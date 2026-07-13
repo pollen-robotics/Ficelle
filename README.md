@@ -278,6 +278,13 @@ pip install "./client[iroh]"
 
 Notes:
 
+- **Access control**: with the iroh transport, possession of the printed
+  ticket is the only access control (there is no `api_key` over iroh yet) —
+  keep the ticket secret, prefer a trusted/private network, and don't paste
+  it anywhere public. A shared-secret auth may be added later.
+- **One client per process**: because iroh-ffi's uniffi event loop is
+  process-global, only one `IrohPolicyClient` (or one iroh endpoint) may be
+  live per process — a second concurrent one will stall the first.
 - **First connect may take a moment.** iroh tries a direct (hole-punched)
   path first and falls back to a relay if NAT traversal fails; the very
   first request after construction can be slower while that negotiation

@@ -145,7 +145,7 @@ def test_jpeg_refused_when_server_is_raw_only(fake_host, server):
         PolicyClient("127.0.0.1", server.port, jpeg_quality=90)
 
 
-@pytest.mark.parametrize("quality", [0, 101, "high"])
+@pytest.mark.parametrize("quality", [0, 101, "high", True])
 def test_jpeg_quality_validated(quality):
     with pytest.raises(ValueError, match="jpeg_quality must be an integer between 1 and 100"):
         PolicyClient.__new__(PolicyClient)._check_jpeg_quality(quality)
