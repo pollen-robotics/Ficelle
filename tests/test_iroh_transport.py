@@ -7,7 +7,6 @@ import asyncio
 import pathlib
 import subprocess
 import sys
-import threading
 import time
 
 import iroh
@@ -18,6 +17,7 @@ from iroh_transport import ALPN, MAX_FRAME, OP_INFER, OP_META, ST_ERR, ST_OK, Ir
 import ficelle_client
 from ficelle_client import IrohPolicyClient, PolicyServerError, msgpack_numpy
 from policy_host import PolicyHost
+from tests._helpers import gradient_frame, read_ticket, stacked_obs
 from tests.test_policy_host import StubConfig, StubPolicy, identity
 
 
@@ -188,25 +188,7 @@ class StubServerProcess:
         self.ticket = self._read_ticket(ticket_timeout)
 
     def _read_ticket(self, timeout: float) -> str:
-        """Read stdout on a helper thread so a wedged spawn can't hang the
-        suite forever — if no TICKET line arrives in `timeout`, kill the
-        process and fail with whatever it wrote to stderr."""
-        result: dict = {}
-
-        def reader():
-            for line in self._proc.stdout:
-                if line.startswith("TICKET "):
-                    result["ticket"] = line[len("TICKET "):].strip()
-                    return
-
-        t = threading.Thread(target=reader, daemon=True)
-        t.start()
-        t.join(timeout)
-        if "ticket" not in result:
-            self._proc.kill()
-            stderr = self._proc.stderr.read() if self._proc.stderr else ""
-            raise RuntimeError(f"stub iroh server never printed a ticket in {timeout}s:\n{stderr}")
-        return result["ticket"]
+        return read_ticket(self._proc, timeout, "stub iroh server")
 
     def stop(self):
         self._proc.terminate()
@@ -215,19 +197,6 @@ class StubServerProcess:
         except subprocess.TimeoutExpired:
             self._proc.kill()
             self._proc.wait(timeout=5)
-
-
-def _stacked_obs() -> dict:
-    # Gradient content (not i.i.d. noise): JPEG needs spatial correlation to
-    # compress at all — mirrors tests/test_policy_client.py's helper.
-    xx, yy = np.meshgrid(np.arange(96, dtype=np.uint8) * 2, np.arange(96, dtype=np.uint8) * 2)
-    frame0 = np.stack([xx, yy, np.full_like(xx, 32)], axis=-1)
-    frame1 = np.stack([np.full_like(xx, 200), xx[::-1], yy], axis=-1)
-    return {
-        "observation.images.cam0": np.stack([frame0, frame1]),
-        "observation.state": np.zeros((2, 2), dtype=np.float32),
-        "task": "pick",
-    }
 
 
 def test_client_metadata_and_infer():
@@ -280,7 +249,7 @@ def test_client_jpeg_roundtrip():
     srv = StubServerProcess("--echo-image")
     try:
         with IrohPolicyClient(srv.ticket, jpeg_quality=90) as client:
-            obs = _stacked_obs()
+            obs = stacked_obs()
             reply = client.infer(obs)
             assert client.last_request_bytes is not None
             assert client.last_request_bytes < obs["observation.images.cam0"].nbytes / 5
@@ -315,7 +284,7 @@ def test_client_resize_shrinks_and_infers():
     srv = StubServerProcess("--resize")
     try:
         with IrohPolicyClient(srv.ticket, resize=True, jpeg_quality=90) as client:
-            obs = _stacked_obs()
+            obs = stacked_obs()
             reply = client.infer(obs)
             assert reply["actions"].shape == (8, 11)
             assert client.last_request_bytes < obs["observation.images.cam0"].nbytes / 10
@@ -398,23 +367,7 @@ class ServePyProcess:
         self.ticket = self._read_ticket(ticket_timeout)
 
     def _read_ticket(self, timeout: float) -> str:
-        result: dict = {}
-
-        def reader():
-            for line in self._proc.stdout:
-                if line.startswith("TICKET "):
-                    result["ticket"] = line[len("TICKET "):].strip()
-                    return
-
-        t = threading.Thread(target=reader, daemon=True)
-        t.start()
-        t.join(timeout)
-        if "ticket" not in result:
-            self._proc.kill()
-            stderr = self._proc.stderr.read() if self._proc.stderr else ""
-            self._proc.wait(timeout=10)  # reap so a startup failure doesn't leak a zombie
-            raise RuntimeError(f"serve.py never printed a ticket in {timeout}s:\n{stderr}")
-        return result["ticket"]
+        return read_ticket(self._proc, timeout, "serve.py", reap_timeout=10)
 
     def stop(self):
         self._proc.terminate()
@@ -423,15 +376,6 @@ class ServePyProcess:
         except subprocess.TimeoutExpired:
             self._proc.kill()
             self._proc.wait(timeout=10)
-
-
-def _gradient_frame(h: int, w: int) -> np.ndarray:
-    """One (h, w, 3) uint8 frame with spatial correlation — JPEG needs
-    gradient content (not i.i.d. noise) to compress at all, same reasoning
-    as _stacked_obs() above."""
-    xx, yy = np.meshgrid(np.linspace(0, 255, w, dtype=np.uint8),
-                         np.linspace(0, 255, h, dtype=np.uint8))
-    return np.stack([xx, yy, np.full_like(xx, 128)], axis=-1)
 
 
 def _real_ckpt_obs(meta: dict) -> dict:
@@ -444,7 +388,7 @@ def _real_ckpt_obs(meta: dict) -> dict:
         shape = spec["wire_shape"]
         if spec["dtype"] == "uint8":
             h, w = shape[-3], shape[-2]
-            obs[key] = np.broadcast_to(_gradient_frame(h, w), shape).copy()
+            obs[key] = np.broadcast_to(gradient_frame(h, w), shape).copy()
         else:
             obs[key] = rng.standard_normal(shape).astype(np.float32)
     return obs

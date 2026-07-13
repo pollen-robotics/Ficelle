@@ -7,10 +7,12 @@ over the network to a robot, without touching pickle.
 
 ficelle is a small server + client pair for running LeRobot policy inference
 remotely: the server loads any LeRobot checkpoint (diffusion, pi0fast, ...) on
-a GPU machine and serves it over a websocket; the robot-side client is a
-3-dependency (`websockets`, `msgpack`, `numpy`) package with no `torch` and no
-`lerobot`, so it drops into any robot control loop. The wire protocol is
-copied from [openpi](https://github.com/Physical-Intelligence/openpi): on
+a GPU machine and serves it over the network — a websocket by default, or
+[iroh](#5-iroh-transport-zero-config-remote) for zero-config remote access
+without a VPN; the robot-side client is a 3-dependency (`websockets`,
+`msgpack`, `numpy`) package with no `torch` and no `lerobot`, so it drops into
+any robot control loop. Both transports speak the same wire protocol, copied
+from [openpi](https://github.com/Physical-Intelligence/openpi): on
 connect the server pushes a metadata frame describing exactly what
 observations it expects, then it's request (observation) / reply (action
 chunk) over binary msgpack frames. Everything is serialized with msgpack —
@@ -44,11 +46,13 @@ Flags:
 | Flag | Default | Meaning |
 |---|---|---|
 | `--checkpoint` | *(required)* | HF Hub repo id or local checkpoint dir |
-| `--host` | `0.0.0.0` | bind address — see [Remote access over Tailscale](#4-remote-access-over-tailscale) for why you usually want your tailnet IP here instead |
-| `--port` | `8000` | listening port |
-| `--api_key` | `None` | optional shared secret; clients must pass the same `--api_key` |
+| `--host` | `0.0.0.0` | bind address (websocket transport only) — see [Remote access over Tailscale](#4-remote-access-over-tailscale) for why you usually want your tailnet IP here instead |
+| `--port` | `8000` | listening port (websocket transport only) |
+| `--api_key` | `None` | optional shared secret; clients must pass the same `--api_key` (websocket transport only — iroh's access control is ticket possession, see [§5](#5-iroh-transport-zero-config-remote)) |
 | `--device` | `cuda` if available, else `cpu` | inference device |
 | `--dtype` | `None` (checkpoint's native dtype) | `float32` or `bfloat16` — **use `--dtype bfloat16` for pi0fast** (a 3B-parameter model; float32 weights alone are ~12 GB) |
+| `--transport` | `websocket` | `websocket` (needs Tailscale/VPN for remote access, [§4](#4-remote-access-over-tailscale)) or `iroh` (zero-config remote access, recommended — [§5](#5-iroh-transport-zero-config-remote)) |
+| `--relay-url` | `None` | iroh transport only: self-hosted relay URL (else n0 public relays) |
 
 Example for a pi0fast checkpoint:
 
@@ -191,9 +195,13 @@ with PIL `BILINEAR` / `cv2.INTER_AREA`).
 ## 4. Remote access over Tailscale
 
 For running the server on a GPU box and the client on a robot on a different
-network, [Tailscale](https://tailscale.com/) is the simplest way to get a
-private, low-latency link between them without exposing the server to the
-public internet.
+network, this section covers [Tailscale](https://tailscale.com/): a private,
+low-latency VPN link between the two machines, without exposing the server to
+the public internet. If you don't already run a tailnet,
+[`--transport iroh`](#5-iroh-transport-zero-config-remote) needs no VPN setup
+and is the recommended way to go remote; reach for Tailscale instead if you
+want a persistent private network beyond just ficelle, or need `--api_key`
+support (not available over iroh yet).
 
 1. Install Tailscale on **both** the GPU machine and the robot, and join them
    to the same tailnet.
@@ -230,8 +238,8 @@ public internet.
 ## 5. iroh transport (zero-config remote)
 
 Tailscale ([§4](#4-remote-access-over-tailscale)) needs both machines joined
-to a tailnet ahead of time. `--transport iroh` is the zero-config
-alternative: no VPN, no account, no shared network to set up — the server
+to a tailnet ahead of time. `--transport iroh` is the recommended zero-config
+alternative for most setups: no VPN, no account, no shared network to set up — the server
 prints a one-line **ticket** that fully describes how to reach it, and the
 client dials that ticket directly. Under the hood it's QUIC with iroh's
 built-in NAT hole-punching (see `experiments/iroh_probe/` for the proof of

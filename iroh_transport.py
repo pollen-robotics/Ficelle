@@ -67,11 +67,12 @@ async def handle_stream(bi, policy_host) -> None:
         await send.write_all(bytes([ST_OK]) + msgpack_numpy.packb(result))
     except ObservationError as e:
         await send.write_all(bytes([ST_ERR]) + f"ficelle: {e}".encode())
-    except iroh.iroh_ffi.IrohError as e:
-        # read_to_end(MAX_FRAME) raises this (message() == "TooLong") when the
-        # client's request exceeds the cap — report it like any other bad
-        # request instead of falling into the generic internal-error branch.
-        if e.message() == "TooLong":
+    except Exception as e:  # noqa: BLE001 — protect the accept loop, report to client
+        # read_to_end(MAX_FRAME) raises iroh.iroh_ffi.IrohError (message() ==
+        # "TooLong") when the client's request exceeds the cap — report it
+        # like any other bad request instead of the generic internal-error
+        # branch below.
+        if isinstance(e, iroh.iroh_ffi.IrohError) and e.message() == "TooLong":
             await send.write_all(
                 bytes([ST_ERR])
                 + "ficelle: request too large (limit 8MB) — enable jpeg_quality/resize "
@@ -80,9 +81,6 @@ async def handle_stream(bi, policy_host) -> None:
         else:
             logger.exception("internal error handling iroh stream")
             await send.write_all(bytes([ST_ERR]) + f"ficelle: internal server error ({type(e).__name__})".encode())
-    except Exception as e:  # noqa: BLE001 — protect the accept loop, report to client
-        logger.exception("internal error handling iroh stream")
-        await send.write_all(bytes([ST_ERR]) + f"ficelle: internal server error ({type(e).__name__})".encode())
     await send.finish()
 
 

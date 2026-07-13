@@ -3,6 +3,7 @@ import pytest
 
 from ficelle_client import PolicyClient, PolicyServerError
 from policy_host import PolicyHost
+from tests._helpers import stacked_obs
 from tests.conftest import FakeHost, ServerThread
 from tests.test_policy_host import ResizeStubConfig, StubConfig, StubPolicy, identity
 
@@ -93,26 +94,12 @@ def _resize_stub_policy_host():
                       checkpoint="stub/resize-ckpt", device="cpu", fps=None)
 
 
-def _stacked_obs():
-    # Gradient content (not i.i.d. noise): JPEG needs spatial correlation to
-    # compress at all, so this is what makes the "big win or bust" size
-    # assertion below meaningful.
-    xx, yy = np.meshgrid(np.arange(96, dtype=np.uint8) * 2, np.arange(96, dtype=np.uint8) * 2)
-    frame0 = np.stack([xx, yy, np.full_like(xx, 32)], axis=-1)
-    frame1 = np.stack([np.full_like(xx, 200), xx[::-1], yy], axis=-1)
-    return {
-        "observation.images.cam0": np.stack([frame0, frame1]),
-        "observation.state": np.zeros((2, 2), dtype=np.float32),
-        "task": "pick",
-    }
-
-
 def test_jpeg_end_to_end_against_real_host():
     host = _stub_policy_host()
     st = ServerThread(host)
     try:
         with PolicyClient("127.0.0.1", st.port, jpeg_quality=90) as client:
-            obs = _stacked_obs()
+            obs = stacked_obs()
             reply = client.infer(obs)
             assert reply["actions"].shape == (8, 11)
             assert client.last_request_bytes < obs["observation.images.cam0"].nbytes / 5
@@ -131,7 +118,7 @@ def test_jpeg_caller_contract_unchanged():
     st = ServerThread(_stub_policy_host())
     try:
         with PolicyClient("127.0.0.1", st.port, jpeg_quality=90) as client:
-            bad = _stacked_obs()
+            bad = stacked_obs()
             bad["observation.state"] = np.zeros((2, 3), dtype=np.float32)
             with pytest.raises(ValueError, match=r"shape \[2, 3\], expected \[2, 2\]"):
                 client.infer(bad)
@@ -159,7 +146,7 @@ def test_resize_shrinks_and_infers():
     st = ServerThread(host)
     try:
         with PolicyClient("127.0.0.1", st.port, resize=True, jpeg_quality=90) as client:
-            obs = _stacked_obs()
+            obs = stacked_obs()
             reply = client.infer(obs)
             assert reply["actions"].shape == (8, 11)
             assert client.last_request_bytes < obs["observation.images.cam0"].nbytes / 10
@@ -183,7 +170,7 @@ def test_resize_caller_contract_unchanged():
     st = ServerThread(_resize_stub_policy_host())
     try:
         with PolicyClient("127.0.0.1", st.port, resize=True) as client:
-            bad = _stacked_obs()
+            bad = stacked_obs()
             bad["observation.state"] = np.zeros((2, 3), dtype=np.float32)
             with pytest.raises(ValueError, match=r"shape \[2, 3\], expected \[2, 2\]"):
                 client.infer(bad)

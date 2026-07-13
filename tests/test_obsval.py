@@ -7,12 +7,7 @@ import numpy as np
 from PIL import Image
 
 from ficelle_client import _obsval
-
-
-def _gradient_frame(h: int, w: int) -> np.ndarray:
-    xx, yy = np.meshgrid(np.linspace(0, 255, w, dtype=np.uint8),
-                         np.linspace(0, 255, h, dtype=np.uint8))
-    return np.stack([xx, yy, np.full_like(xx, 128)], axis=-1)
+from tests._helpers import gradient_frame as _gradient_frame
 
 
 def test_cv2_resizer_never_uses_inter_linear(monkeypatch):
