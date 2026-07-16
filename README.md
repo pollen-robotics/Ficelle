@@ -65,6 +65,15 @@ automatically) or a local checkpoint directory. On startup the server prints
 the checkpoint it loaded, the exact observation contract it expects, and
 either a `ws://` address or an iroh ticket to give to the client.
 
+### Startup & the first request
+
+On launch, after loading the checkpoint the server runs one warmup inference
+before printing its ticket / "ready to serve" — so by the time you have an
+address to dial, the first *real* request is already fast. See
+[`docs/remote-access.md#startup--the-first-request`](docs/remote-access.md#startup--the-first-request)
+for the details (why it's safe, when it's skipped, and the `infer_timeout`
+fallback).
+
 ## Client
 
 ```python
@@ -107,9 +116,12 @@ Notes:
 - **Always use JPEG over iroh**: raw frames measured ~0.6 s per request on a
   direct path but **3.7–5 s when iroh fell back to the relay** (~1 Mbps
   throttle).
-- **Cold start**: the first request to a large model can exceed 30 s
-  (CUDA/model warmup) — set the client's `infer_timeout` to **at least 60 s**
-  for VLA models. Subsequent requests are fast.
+- **Cold start**: the server now pays the ~30 s CUDA/model warmup at startup
+  (see [Startup & the first request](#startup--the-first-request)), not on
+  the first request. If warmup is skipped for a checkpoint, the first
+  request pays it instead — set the client's `infer_timeout` to **at least
+  60 s** for VLA models as a fallback. Subsequent requests are fast either
+  way.
 - CPU serving is ~8 s/request (dev/testing only, not for real-time control).
 
 ## Troubleshooting

@@ -4,6 +4,34 @@ Back to the [README](../README.md). This is the full story on getting the
 client and server talking across networks; the README only covers the
 recommended default (`--transport iroh`).
 
+## Startup & the first request
+
+A large model's first forward pass triggers CUDA kernel autotuning and other
+lazy initialization that can take 30+ seconds. Historically that cost landed
+on the first client request. Instead, on launch the server loads the
+checkpoint and then runs one **warmup inference** — a synthetic all-zeros
+observation through the exact same code path as a real request — before
+printing its `ws://` address or iroh ticket / logging "ready to serve". By
+the time you have something to dial, the model is already warm, so the
+first real request is fast too.
+
+This is:
+
+- **Behavior-neutral**: warmup runs under `eval()`/`no_grad()` (no weight or
+  running-stat change), `reset()` runs first exactly as it does for every
+  real request (no queue state leaks forward), and the model's RNG state is
+  saved and restored around the call — so the model's stochastic sampling
+  (flow-matching/diffusion noise draws) is provably unaffected.
+- **Best-effort**: some policies reject a synthetic all-zeros probe (e.g.
+  pi0fast's free-running generation asserts on degenerate input). If warmup
+  is skipped, the server logs a warning and starts anyway — the first real
+  request then pays the warmup cost itself, exactly as it did before this
+  feature existed. This is why the `infer_timeout ≥ 60s` guidance (see
+  [Cold start](#cold-start) below) still applies as a fallback.
+- **Slower startup**: expect launch to take extra seconds (up to the ~30 s
+  cold-start cost) for large models — the ticket / "ready to serve" line
+  only appears after warmup finishes.
+
 ## iroh (recommended, zero-config)
 
 `--transport iroh` needs no VPN, no account, and no shared network set up
@@ -62,10 +90,12 @@ optional — always set it when using iroh.
 
 ### Cold start
 
-The very first request to a large model (a multi-billion-parameter flow VLA,
-for example) can take 30+ seconds while CUDA and the model warm up on the
-server. This isn't a network problem. Set the client's `infer_timeout` to at
-least 60 seconds for VLA-class models:
+As of [Startup & the first request](#startup--the-first-request) above, the
+~30 s CUDA/model warmup for large models is normally paid once at server
+launch, not on the first client request. If warmup was skipped for a given
+checkpoint (see above), the first request pays that cost instead — this
+isn't a network problem. Keep the client's `infer_timeout` at at least 60
+seconds for VLA-class models as a fallback:
 
 ```python
 client = IrohPolicyClient(ticket, jpeg_quality=90, infer_timeout=60.0)

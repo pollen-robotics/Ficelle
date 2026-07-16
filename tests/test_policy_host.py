@@ -60,6 +60,20 @@ def resize_host():
                       checkpoint="stub/resize-ckpt", device="cpu", fps=None)
 
 
+class RaisingStubPolicy(StubPolicy):
+    """predict_action_chunk always raises — stands in for a checkpoint that
+    rejects the synthetic all-zeros warmup probe (e.g. pi0fast)."""
+
+    def predict_action_chunk(self, batch):
+        raise RuntimeError("degenerate generation")
+
+
+@pytest.fixture
+def raising_host():
+    return PolicyHost(RaisingStubPolicy(StubConfig()), identity, identity,
+                      checkpoint="stub/raising", device="cpu", fps=None)
+
+
 def _good_obs():
     return {
         "observation.images.cam0": np.zeros((2, 96, 96, 3), dtype=np.uint8),
@@ -207,6 +221,27 @@ def test_validation_one_line_errors(host, mutate, match):
     with pytest.raises(ObservationError, match=match) as excinfo:
         host.infer(obs)
     assert "\n" not in str(excinfo.value)
+
+
+def test_warmup_runs_inference_through_real_path(host):
+    host.warmup()
+    policy = host._policy
+    assert policy.reset_calls == 1
+    assert policy.seen_batch is not None
+    assert tuple(policy.seen_batch["observation.images.cam0"].shape) == (1, 2, 3, 96, 96)
+
+
+def test_warmup_preserves_rng_state(host):
+    before = torch.get_rng_state()
+    host.warmup()
+    after = torch.get_rng_state()
+    assert torch.equal(before, after)
+
+
+def test_warmup_is_best_effort_on_policy_failure(raising_host):
+    host = raising_host
+    host.warmup()  # must not raise, even though predict_action_chunk always does
+    assert host._policy.reset_calls == 1  # reset() ran before the failing call
 
 
 def test_single_obs_policy_with_empty_cameras():

@@ -59,7 +59,7 @@ class FicelleServer:
             max_size=None,
             process_request=self._process_request,
         ):
-            logger.info(f"serving on ws://{self._host}:{self._port}")
+            logger.info(f"serving on ws://{self._host}:{self._port} — ready to serve")
             # Run until cancelled — on cancellation the websockets Server.__aexit__
             # closes listeners AND open connections with proper close frames,
             # unlike raw asyncio serve_forever() which waits forever for clients
@@ -161,6 +161,9 @@ def main() -> None:
                 + " (+ optional 'task' string)")
     logger.info(f"replies: {meta['n_action_steps']} x {meta['action_dim']} actions per request | "
                 f"training fps: {meta['fps']}")
+    # pays the first-forward CUDA/model warmup cost here instead of on the
+    # first client request — see PolicyHost.warmup()'s docstring
+    host_obj.warmup()
     try:
         if args.transport == "iroh":
             # iroh is a required server dependency (see pyproject.toml); this
@@ -179,6 +182,7 @@ def main() -> None:
                 # the log lines above go through logging's formatter, so a
                 # machine reader would need to parse timestamps/levels too.
                 print(f"TICKET {server.ticket()}", flush=True)
+                logger.info("ready to serve")
                 await run_task
 
             asyncio.run(_run())

@@ -171,6 +171,43 @@ class PolicyHost:
         chunk = np.stack([a.squeeze(0).float().cpu().numpy() for a in steps]).astype(np.float32)
         return {"actions": chunk, "server_timing": {"infer_ms": infer_ms}}
 
+    def warmup(self) -> None:
+        """Pay the first-forward cost (CUDA kernel autotune / lazy init — the
+        ~30 s cold start large models otherwise take on their first request)
+        here at startup, by running one throwaway inference through the real
+        path before the server starts accepting connections.
+
+        Safe: inference is read-only under eval()+no_grad() (no weight or
+        running-stat change), predict_action_chunk is preceded by reset() —
+        exactly like every real request — so no queue state leaks forward,
+        and the model's RNG state is saved and restored around the call so
+        this is provably a no-op w.r.t. the model's stochastic draws (e.g.
+        flow/diffusion sampling noise).
+
+        Best-effort: some policies reject degenerate all-zero input (e.g.
+        pi0fast's free-running generation asserts on a synthetic probe). Any
+        exception here is logged and swallowed — the first real request then
+        simply pays the warmup cost itself, as if this had never been called.
+        """
+        logger.info("warming up model...")
+        t0 = time.perf_counter()
+        torch_rng_state = torch.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        try:
+            obs = {}
+            for key, spec in self._obs_spec.items():
+                dtype = np.uint8 if spec["kind"] == "image" else np.float32
+                obs[key] = np.zeros(spec["wire_shape"], dtype=dtype)
+            obs["task"] = ""
+            self.infer(obs)
+            logger.info(f"warmup complete ({time.perf_counter() - t0:.1f}s)")
+        except Exception as e:  # noqa: BLE001 — best-effort, never fatal to startup
+            logger.warning(f"warmup skipped ({type(e).__name__}: {e})")
+        finally:
+            torch.set_rng_state(torch_rng_state)
+            if cuda_rng_state is not None:
+                torch.cuda.set_rng_state_all(cuda_rng_state)
+
     def _split_frames(self, obs: dict) -> list[dict]:
         """n_obs_steps single-frame numpy dicts, oldest first. Copies are
         deliberate: msgpack-decoded arrays are read-only, torch.from_numpy needs
