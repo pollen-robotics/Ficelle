@@ -1,3 +1,10 @@
+> Design background: the original planning brief for ficelle, kept for
+> historical/design context. Written before the public release; some framing
+> reflects that point in time. Note: pi0fast, discussed throughout as the
+> driving use case, is currently broken upstream in LeRobot (free-running
+> generation collapses — a model/training issue, not ficelle) and isn't a
+> working example today.
+
 # Project brief: Ficelle — generic LeRobot policy server ("serve any policy, anywhere")
 
 *Ficelle: the puppeteer's string — the thin link that carries motion from
@@ -5,7 +12,7 @@ the hand that decides to the puppet that moves. Name verified available on
 PyPI and unclaimed in the GitHub tooling namespace (2026-07-12).*
 
 *Handoff brief for a dedicated development session. Written 2026-07-12 from
-the Grabette project, where all context below was established. Companion
+a downstream robot project, where all context below was established. Companion
 document: `docs/policy_serving_survey.md` (the tooling survey this design is
 based on — read it first).*
 
@@ -51,7 +58,7 @@ this is publishable open source and a credible upstream contribution.
    id, policy type, expected observation keys and shapes/dtypes, action dim,
    chunk size, n_action_steps, training fps, and a protocol version.
    Client validates before the first inference; mismatches produce a clear
-   error naming the offending key. (Grabette rule: every failure must be
+   error naming the offending key. (House rule: every failure must be
    self-explaining — users of this tool won't have a debugging assistant.)
 3. **Preprocessing runs server-side** using the checkpoint's own lerobot
    pipeline (`make_pre_post_processors`) — the client sends RAW observations
@@ -89,13 +96,13 @@ ficelle/
 
 Server CLI sketch:
 ```bash
-uv run python serve.py --checkpoint SteveNguyen/grabette_pick3_pi0fast \
+uv run python serve.py --checkpoint <org>/<pi0fast-checkpoint> \
     --host 100.x.y.z --port 8000 [--api_key ...] [--device cuda] [--dtype bfloat16]
 ```
 
 v0 acceptance test (definition of "works properly"):
-1. Serve `SteveNguyen/test_pick_mustard_200_diffusion-best` (small, fast) and
-   `SteveNguyen/grabette_pick3_pi0fast` (3B; on the 5090).
+1. Serve a small diffusion checkpoint (fast) and a pi0fast checkpoint
+   (3B; on the 5090).
 2. `random_client.py` from another machine over Tailscale: correct action
    shapes, p50/p95 round-trip latency printed; diffusion ≲150 ms, pi0fast
    ≲700 ms per chunk over internet (5090).
@@ -104,10 +111,9 @@ v0 acceptance test (definition of "works properly"):
 4. Server survives client disconnect/reconnect; client survives server
    restart (auto-retry like openpi's).
 
-## 4. Integration contract with Grabette (the first real consumer)
+## 4. Integration contract with the first consuming eval loop
 
-Grabette's eval loop is
-`grabette/integrations/openarm/openarm_gripette_simu/examples/evaluate.py`,
+The first consumer is a custom robot eval loop's `evaluate.py` script,
 run in SYNC mode (`--n_action_steps 4` for diffusion; pi0fast chunk 10).
 Integration = a `--policy_addr host:port` mode where the local
 `select_action` path is replaced at CHUNK granularity by `client.infer()`.
@@ -120,7 +126,7 @@ What the client must send per inference (from the eval loop's existing data):
   "pick up the red can" / "pick up the cup")
 
 Policy-specific caveats the server must absorb (all verified this week):
-- **Diffusion (grabette recipe)**: `n_obs_steps=2` — the policy conditions
+- **Diffusion (this project's recipe)**: `n_obs_steps=2` — the policy conditions
   on an observation PAIR. The lerobot queue-based API handles this via two
   `select_action` calls (see `run_episode_async.make_batch` two-call pattern
   in evaluate.py). Server-side, either accept a 2-frame observation or
@@ -129,22 +135,20 @@ Policy-specific caveats the server must absorb (all verified this week):
   processor pipeline (do NOT require the client to send them); load with
   `PreTrainedConfig.from_pretrained` then `policy.to(bfloat16)` (CPU-load
   first if memory-tight); the checkpoint's own processor pipeline loads fine
-  for inference (unlike training, where it had to be rebuilt — see
-  `integrations/Pi0Fast/train_pi0fast.py` docstring for that story).
+  for inference (unlike training, where it had to be rebuilt — see the
+  downstream project's pi0fast training script for that story).
 
 ## 5. Hard-won context the new session should not rediscover
 
-- **lerobot version pinning discipline**: the pi0fast checkpoint
-  (`SteveNguyen/grabette_pick3_pi0fast`) was trained on lerobot main at
-  commit `e40b58a8dfa9e7b86918c374791599d070518d11` (pinned in
-  `grabette/integrations/Pi0Fast/pyproject.toml`). The SERVER must use a
+- **lerobot version pinning discipline**: the pi0fast checkpoint was trained
+  on a pinned lerobot main commit. The SERVER must use a
   compatible revision — train/infer version skew is how pi0fast generation
-  breaks (double-<bos> saga; see `docs/policy_comparison_gripette.md` and
-  the pi0fast-minimal-repro project). The client, by design, has no lerobot
-  dependency at all.
-- **The FAST action tokenizer** for the pi0fast model is
-  `SteveNguyen/fast_tokenizer_grabette_pick3` (fit on our data); it loads via
-  the checkpoint config. The original `physical-intelligence/fast` repo does
+  breaks (double-<bos> saga; see the downstream project's model-comparison
+  notes and its pi0fast-minimal-repro project). The client, by design, has no
+  lerobot dependency at all.
+- **The FAST action tokenizer** for the pi0fast model is a project-specific,
+  fitted tokenizer repo; it loads via the checkpoint config. The original
+  `physical-intelligence/fast` repo does
   NOT load on transformers v5 (Hub packaging bug) — if a tokenizer load
   error appears, that's the first suspect.
 - **Inference speed expectations** (for latency budgets): pi0fast 3B
@@ -153,18 +157,17 @@ Policy-specific caveats the server must absorb (all verified this week):
   (~100M) ≈ 60 ms/chunk on the 4070. Prefill note: 2 of 3 camera slots are
   zero-padding (empty_cameras=2) — a future training without them would cut
   pi0fast prefill ~3×; not this project's concern but explains the numbers.
-- **Working style** (owner: Steve, robotics engineer at Pollen): uv for
-  everything (`uv run`, pyproject per project, `[tool.uv] package=false` for
-  scripts-only dirs); plan and align before implementing; simplicity first —
-  no speculative abstractions; READMEs written for non-experts with
-  troubleshooting tables (users won't have a coding assistant); every
-  failure guarded or self-explaining; he handles git commits himself.
+- **Working style**: uv for everything (`uv run`, pyproject per project,
+  `[tool.uv] package=false` for scripts-only dirs); plan and align before
+  implementing; simplicity first — no speculative abstractions; READMEs
+  written for non-experts with troubleshooting tables (users won't have a
+  coding assistant); every failure guarded or self-explaining.
 - **Reference patterns to copy**: openpi
   `packages/openpi-client/src/openpi_client/websocket_client_policy.py` and
   `.../base_policy.py`, plus their `serve_policy.py` /
   `websocket_policy_server.py` (github.com/Physical-Intelligence/openpi) —
-  clean, minimal, proven. Grabette's `integrations/Pi0Fast/smoke_generation.py`
-  shows exactly how to load + run inference on the pi0fast checkpoint.
+  clean, minimal, proven. The downstream project's own pi0fast smoke-test
+  script shows exactly how to load + run inference on the pi0fast checkpoint.
 
 ## 6. Milestones
 
@@ -172,10 +175,9 @@ Policy-specific caveats the server must absorb (all verified this week):
    the diffusion checkpoint. Metadata contract working.
 2. **Day 2**: pi0fast on the 5090, Tailscale link from the laptop,
    acceptance tests 1–4 green.
-3. **Then, back in the Grabette session**: `--policy_addr` mode in
-   evaluate.py (grabette-side change, ~50 lines) and the first remote-served
+3. **Then, back in the consuming project's session**: `--policy_addr` mode in
+   evaluate.py (a ~50-line change on that side) and the first remote-served
    arm run.
 4. **Later / stretch**: JPEG image encoding flag, overlap-blending client
    scheduler, README polish for open-sourcing, upstream conversation with
-   the LeRobot team (they know our contact — the pi0fast double-bos report
-   came from us).
+   the LeRobot team about the pi0fast double-bos bug report.

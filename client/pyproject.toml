@@ -2,6 +2,7 @@
 name = "ficelle-client"
 version = "0.1.0"
 description = "Dependency-light client for a ficelle policy server (no torch, no lerobot)"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = [
     "websockets>=14",

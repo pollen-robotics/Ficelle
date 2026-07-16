@@ -1,8 +1,13 @@
+> Design background: a point-in-time survey (2026-07) of the VLA
+> policy-serving landscape, kept for its technical value. Note: pi0-FAST,
+> the driving use case throughout, is currently broken upstream in LeRobot
+> (free-running generation collapses — a model/training issue, not ficelle).
+
 # Remote VLA policy inference serving — tooling survey (2026-07)
 
-*Research for serving the pi0-FAST fine-tune from a remote GPU (RTX 5090) to
-the robot eval loop across the internet. Verified against lerobot upstream/main
-source and live GitHub. Companion to `integrations/Pi0Fast`.*
+*Research for serving a pi0-FAST fine-tune from a remote GPU (RTX 5090) to
+a robot eval loop across the internet. Verified against lerobot upstream/main
+source and live GitHub.*
 
 **Scenario:** lerobot pi0-FAST fine-tune (~3B) on a single RTX 5090 box;
 Python robot client on another network with observations already as numpy

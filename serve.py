@@ -25,6 +25,16 @@ from ficelle_client import msgpack_numpy
 
 logger = logging.getLogger("ficelle")
 
+# Verbatim ASCII art — do not retype/reformat by hand.
+STARTUP_BANNER = """\
+   ╺━┳━┳━┳━╸
+     ┃ ┃ ┃
+   ┌─┸─┸─┸─┐
+   │ ●   ● │
+   └─┬───┬─┘
+     ╹   ╹
+"""
+
 
 class FicelleServer:
     """Websocket transport around a policy host: any object with
@@ -130,6 +140,9 @@ def main() -> None:
         parser.error("--api_key is not supported with --transport iroh — access is controlled "
                      "by possession of the ticket; keep the ticket secret and run over a "
                      "trusted/private network")
+
+    print(STARTUP_BANNER)
+    print("ficelle · the puppeteer's string")
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
