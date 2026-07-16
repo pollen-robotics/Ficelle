@@ -67,7 +67,7 @@ def test_offline_chunk_matches_select_action_queue_path(diffusion_host):
     horizon = policy.config.horizon
     noise = torch.randn(1, horizon, action_dim, generator=torch.Generator().manual_seed(0)).to(device)
 
-    # lerobot's own path: two select_action calls (Grabette evaluate.py pattern)
+    # lerobot's own path: two select_action calls (the queue-based eval pattern)
     policy.reset()
     _ = policy.select_action(dict(processed[0]), noise=noise)  # junk chunk from duplicated frame
     policy._queues[ACTION].clear()                             # flush it

@@ -157,11 +157,6 @@ Policy-specific caveats the server must absorb (all verified this week):
   (~100M) ≈ 60 ms/chunk on the 4070. Prefill note: 2 of 3 camera slots are
   zero-padding (empty_cameras=2) — a future training without them would cut
   pi0fast prefill ~3×; not this project's concern but explains the numbers.
-- **Working style**: uv for everything (`uv run`, pyproject per project,
-  `[tool.uv] package=false` for scripts-only dirs); plan and align before
-  implementing; simplicity first — no speculative abstractions; READMEs
-  written for non-experts with troubleshooting tables (users won't have a
-  coding assistant); every failure guarded or self-explaining.
 - **Reference patterns to copy**: openpi
   `packages/openpi-client/src/openpi_client/websocket_client_policy.py` and
   `.../base_policy.py`, plus their `serve_policy.py` /

@@ -6,11 +6,11 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    # MUST match the training revision of the checkpoints being served. This is
-    # the commit the Grabette pi0fast checkpoint was trained on (train/infer
-    # version skew breaks pi0fast generation — double-<bos> saga). Bump deliberately.
+    # MUST match the training revision of the checkpoints being served: this is
+    # the commit the target pi0fast checkpoints were trained on (train/inference
+    # version skew breaks pi0fast generation). Bump deliberately.
     "lerobot[pi,diffusion] @ git+https://github.com/huggingface/lerobot@e40b58a8dfa9e7b86918c374791599d070518d11",
-    # pi0fast runtime extras — same proven set as Grabette's Pi0Fast integration.
+    # runtime extras required by pi0fast-family policies.
     "scipy>=1.10",
     "sentencepiece",
     "num2words",
