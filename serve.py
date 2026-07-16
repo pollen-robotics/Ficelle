@@ -20,7 +20,7 @@ import websockets.asyncio.server
 import websockets.exceptions
 import websockets.frames
 
-from errors import ObservationError
+from errors import POLICY_GENERATION_ERROR, ObservationError
 from ficelle_client import msgpack_numpy
 
 logger = logging.getLogger("ficelle")
@@ -89,6 +89,13 @@ class FicelleServer:
             except ObservationError as e:
                 await websocket.send(f"ficelle: {e}")
                 continue
+            except AssertionError:
+                logger.error(traceback.format_exc())
+                await websocket.send(POLICY_GENERATION_ERROR)
+                await websocket.close(
+                    code=websockets.frames.CloseCode.INTERNAL_ERROR, reason="internal error"
+                )
+                return
             except Exception:
                 logger.error(traceback.format_exc())
                 await websocket.send("ficelle: internal server error — see server log for the traceback")
@@ -116,7 +123,7 @@ def main() -> None:
     parser.add_argument("--transport", choices=["websocket", "iroh"], default="websocket",
                         help="websocket (default, needs Tailscale/VPN for remote use) or "
                              "iroh (QUIC with built-in NAT hole-punching, see experiments/iroh_probe/)")
-    parser.add_argument("--relay-url", default=None,
+    parser.add_argument("--relay_url", default=None,
                         help="iroh transport only: self-hosted relay URL (else n0 public relays)")
     args = parser.parse_args()
     if args.transport == "iroh" and args.api_key is not None:

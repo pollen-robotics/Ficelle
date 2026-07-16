@@ -32,8 +32,8 @@ PROTOCOL = "ficelle/1"
 def load_policy_host(checkpoint: str, device: str, dtype: str | None) -> "PolicyHost":
     """Load ANY LeRobot policy checkpoint (hub repo id or local dir) for serving.
 
-    CPU-first load, optional dtype cast, then move to device — the memory-tight
-    pattern proven on the 3B pi0fast (Grabette's smoke_generation.py).
+    CPU-first load then cast/move-to-device avoids a memory spike when loading
+    large policies.
     """
     cfg = PreTrainedConfig.from_pretrained(checkpoint)
     cfg.device = "cpu"

@@ -42,6 +42,8 @@ class FakeHost:
             raise ObservationError("task 'reject me' rejected as requested")
         if obs.get("task") == "crash":           # hook for internal-error tests
             raise RuntimeError("fake internal crash")
+        if obs.get("task") == "crash assert":    # hook for the AssertionError-specific message
+            raise AssertionError("fake upstream assertion")
         return {"actions": np.zeros((10, 2), dtype=np.float32), "server_timing": {"infer_ms": 1.0}}
 
 

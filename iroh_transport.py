@@ -19,7 +19,7 @@ import logging
 
 import iroh
 
-from errors import ObservationError
+from errors import POLICY_GENERATION_ERROR, ObservationError
 from ficelle_client import msgpack_numpy
 
 logger = logging.getLogger("ficelle")
@@ -67,6 +67,9 @@ async def handle_stream(bi, policy_host) -> None:
         await send.write_all(bytes([ST_OK]) + msgpack_numpy.packb(result))
     except ObservationError as e:
         await send.write_all(bytes([ST_ERR]) + f"ficelle: {e}".encode())
+    except AssertionError:
+        logger.error("policy failed to generate actions", exc_info=True)
+        await send.write_all(bytes([ST_ERR]) + POLICY_GENERATION_ERROR.encode())
     except Exception as e:  # noqa: BLE001 — protect the accept loop, report to client
         # read_to_end(MAX_FRAME) raises iroh.iroh_ffi.IrohError (message() ==
         # "TooLong") when the client's request exceeds the cap — report it
@@ -145,7 +148,6 @@ class IrohPolicyServer:
             raise
         self._ready.set()
         logger.info(f"iroh node id: {self._ep.id()}")
-        logger.info(f"iroh ticket:  {self.ticket()}")
         while True:
             incoming = await self._ep.accept_next()
             if incoming is None:

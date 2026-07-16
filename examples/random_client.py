@@ -2,8 +2,13 @@
 
 Reads the server's metadata, sends N random observations that match it, and
 prints round-trip latency percentiles. Needs only ficelle-client + numpy —
-run it from any machine that can reach the server (e.g. over Tailscale):
+run it from any machine that can reach the server:
 
+    # iroh transport (recommended): pass the ticket printed by
+    # `serve.py --transport iroh`
+    uv run python examples/random_client.py endpointaaiax... [-n 50] [--resize]
+
+    # websocket transport (needs Tailscale/VPN for remote use)
     uv run python examples/random_client.py --host 100.x.y.z [-n 50] [--task "pick up the cup"]
 """
 
@@ -13,7 +18,7 @@ import time
 
 import numpy as np
 
-from ficelle_client import PolicyClient
+from ficelle_client import open_client
 
 
 def synthetic_obs(metadata: dict, task: str, rng: np.random.Generator) -> dict:
@@ -29,17 +34,34 @@ def synthetic_obs(metadata: dict, task: str, rng: np.random.Generator) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--host", required=True)
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("addr", nargs="?", default=None,
+                        help="iroh ticket, or a host:port websocket address — "
+                             "if omitted, built from --host/--port")
+    parser.add_argument("--host", default=None,
+                        help="websocket transport: server host (used when addr is omitted)")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="websocket transport: server port (used when addr is omitted)")
     parser.add_argument("--api_key", default=None)
     parser.add_argument("-n", type=int, default=50, help="number of timed requests")
     parser.add_argument("--task", default="", help="task string to send (for VLA policies)")
     parser.add_argument("--jpeg_quality", type=int, default=None, help="encode images as JPEG at this quality (1-100) before sending")
+    parser.add_argument("--resize", action="store_true",
+                        help="downscale images to the server-negotiated resize_to before sending")
     args = parser.parse_args()
+
+    if args.addr is not None:
+        addr = args.addr
+    elif args.host is not None:
+        addr = f"{args.host}:{args.port}"
+    else:
+        parser.error("provide either addr (an iroh ticket or host:port) or --host")
 
     logging.basicConfig(level=logging.INFO)
     rng = np.random.default_rng(0)
-    with PolicyClient(args.host, args.port, api_key=args.api_key, jpeg_quality=args.jpeg_quality) as client:
+    client_kwargs = {"jpeg_quality": args.jpeg_quality, "resize": args.resize}
+    if args.api_key is not None:
+        client_kwargs["api_key"] = args.api_key
+    with open_client(addr, **client_kwargs) as client:
         meta = client.metadata
         print(f"policy {meta['policy_type']} from {meta['checkpoint']} on {meta['device']} | "
               f"{meta['n_action_steps']} x {meta['action_dim']} actions per request | "

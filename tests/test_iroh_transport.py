@@ -13,6 +13,7 @@ import iroh
 import numpy as np
 import pytest
 
+from errors import POLICY_GENERATION_ERROR
 from iroh_transport import ALPN, MAX_FRAME, OP_INFER, OP_META, ST_ERR, ST_OK, IrohPolicyServer
 import ficelle_client
 from ficelle_client import IrohPolicyClient, PolicyServerError, msgpack_numpy
@@ -61,7 +62,7 @@ async def _request(server: IrohPolicyServer, payload: bytes) -> bytes:
         await client_ep.close()
 
 
-async def _run_against_server(payload: bytes) -> bytes:
+async def _run_against_server(payload: bytes, host=None) -> bytes:
     """Start a fresh IrohPolicyServer, issue one request, tear down.
 
     Note: IrohPolicyServer._options() always binds with iroh.preset_n0()
@@ -71,7 +72,7 @@ async def _run_against_server(payload: bytes) -> bytes:
     client dials server.addr() directly over loopback, so the request/reply
     exchanged in this test never touches the network or n0's relays.
     """
-    server = IrohPolicyServer(_stub_host(), relay_url=None)
+    server = IrohPolicyServer(host if host is not None else _stub_host(), relay_url=None)
     server_task = asyncio.ensure_future(server.run())
     try:
         await server.wait_ready()
@@ -158,6 +159,28 @@ def test_unknown_opcode_errors():
         text = body_bytes.decode()
         assert text.startswith("ficelle: ")
         assert "\n" not in text
+
+    asyncio.run(body())
+
+
+def test_assertion_error_gets_friendly_message():
+    # Same case as test_server_transport.py's websocket counterpart: an
+    # upstream lerobot AssertionError (degenerate generation on an
+    # observation that already passed ficelle's own validation) must get the
+    # same actionable one-liner as the websocket transport, not the generic
+    # "internal server error (AssertionError)" text.
+    class AssertingStubPolicy(StubPolicy):
+        def predict_action_chunk(self, batch):
+            raise AssertionError("fake upstream assertion")
+
+    async def body():
+        host = PolicyHost(AssertingStubPolicy(StubConfig()), identity, identity,
+                          checkpoint="stub/ckpt", device="cpu", fps=None)
+        payload = bytes([OP_INFER]) + msgpack_numpy.packb(_good_obs())
+        reply = await _run_against_server(payload, host=host)
+        status, body_bytes = reply[0], reply[1:]
+        assert status == ST_ERR
+        assert body_bytes.decode() == POLICY_GENERATION_ERROR
 
     asyncio.run(body())
 

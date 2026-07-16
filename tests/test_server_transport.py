@@ -5,6 +5,7 @@ import pytest
 import websockets.exceptions
 import websockets.sync.client
 
+from errors import POLICY_GENERATION_ERROR
 from ficelle_client import msgpack_numpy
 from tests.conftest import ServerThread
 
@@ -63,6 +64,20 @@ def test_internal_error_sends_text_then_closes(server):
         ws.send(msgpack_numpy.packb(_good_obs(task="crash")))
         reply = ws.recv()
         assert isinstance(reply, str) and "internal server error" in reply
+        with pytest.raises(websockets.exceptions.ConnectionClosed):
+            ws.recv()
+
+
+def test_assertion_error_gets_friendly_message_and_closes(server):
+    # An upstream lerobot AssertionError (degenerate generation on an
+    # observation that already passed ficelle's own validation) must get the
+    # actionable one-liner, not the generic "internal server error" text —
+    # but the connection still closes, same as any other internal error.
+    with _connect(server.port) as ws:
+        ws.recv()
+        ws.send(msgpack_numpy.packb(_good_obs(task="crash assert")))
+        reply = ws.recv()
+        assert reply == POLICY_GENERATION_ERROR
         with pytest.raises(websockets.exceptions.ConnectionClosed):
             ws.recv()
 
