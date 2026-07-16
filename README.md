@@ -30,7 +30,7 @@ any control loop. Two transports are supported: a plain websocket, and
 Server (needs [`uv`](https://docs.astral.sh/uv/)):
 
 ```bash
-git clone <REPLACE-WITH-REPO-URL>
+git clone git@github.com:SteveNguyen/Ficelle.git
 cd ficelle
 uv sync
 ```
