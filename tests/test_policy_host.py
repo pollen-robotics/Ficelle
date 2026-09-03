@@ -276,3 +276,65 @@ def test_single_obs_policy_with_empty_cameras():
     assert tuple(seen["observation.images.empty_camera_0"].shape) == (1, 3, 96, 96)
     assert torch.all(seen["observation.images.empty_camera_0"] == 0)
     assert seen["task"] == "pick"
+
+
+# ── chunk-scoped postprocessor steps ────────────────────────────────────
+#
+# This server unnormalizes per STEP — self._post(actions[:, i]), i.e.
+# (B, action_dim) — so a step that needs the whole chunk, or state only the
+# client has, cannot run here. Such steps are dropped at load; without that the
+# server raises on every single request.
+
+class _StubPipeline:
+    def __init__(self, steps):
+        self.steps = list(steps)
+
+
+class AbsoluteFromChunkRelativeStep:
+    """Same class NAME as Grabette's step — that is what the filter matches on,
+    so the real package is not needed to test the behaviour."""
+
+
+class UnnormalizerProcessorStep:
+    pass
+
+
+def test_chunk_scoped_step_is_dropped():
+    from policy_host import _drop_chunk_scoped_steps
+
+    keep, drop = UnnormalizerProcessorStep(), AbsoluteFromChunkRelativeStep()
+    out = _drop_chunk_scoped_steps(_StubPipeline([keep, drop]))
+    assert out.steps == [keep]
+
+
+def test_ordinary_pipelines_are_untouched():
+    from policy_host import _drop_chunk_scoped_steps
+
+    steps = [UnnormalizerProcessorStep(), UnnormalizerProcessorStep()]
+    out = _drop_chunk_scoped_steps(_StubPipeline(steps))
+    assert out.steps == steps, "no-op for checkpoints without a chunk-scoped step"
+
+
+def test_the_filter_is_driven_by_the_declared_set():
+    """Guards against the set being emptied or renamed away from the class it
+    is supposed to match."""
+    from policy_host import _CHUNK_SCOPED_STEP_CLASSES
+
+    assert "AbsoluteFromChunkRelativeStep" in _CHUNK_SCOPED_STEP_CLASSES
+
+
+def test_optional_step_modules_are_importable_or_absent(caplog):
+    """The registration loop must never take the server down: a missing optional
+    package is normal (most checkpoints do not need one), and an import error
+    there would break every checkpoint."""
+    import importlib
+
+    from policy_host import _OPTIONAL_STEP_MODULES
+
+    for module in _OPTIONAL_STEP_MODULES:
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            pass  # absent is fine — that is the point of the try/except at load
+        except Exception as e:  # pragma: no cover
+            pytest.fail(f"{module} raised {type(e).__name__} rather than ImportError: {e}")

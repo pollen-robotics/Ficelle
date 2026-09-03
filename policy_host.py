@@ -6,6 +6,7 @@ pipeline — the server is the only place that can guarantee train/inference
 processing parity (see docs/policy_server_project_brief.md §2.3).
 """
 
+import importlib
 import json
 import logging
 import threading
@@ -26,6 +27,19 @@ from errors import ObservationError
 
 logger = logging.getLogger("ficelle.policy")
 
+# Modules imported (if installed) purely so their @ProcessorStepRegistry.register
+# decorators run before a checkpoint is deserialised. Add a line per external
+# step package; missing ones are ignored.
+_OPTIONAL_STEP_MODULES = (
+    "grabette_chunkrel.chunk_relative_processor",
+)
+
+# Postprocessor step classes that operate on a whole action chunk and therefore
+# cannot run in this server. See _drop_chunk_scoped_steps.
+_CHUNK_SCOPED_STEP_CLASSES = frozenset({
+    "AbsoluteFromChunkRelativeStep",
+})
+
 PROTOCOL = "ficelle/1"
 
 
@@ -35,6 +49,23 @@ def load_policy_host(checkpoint: str, device: str, dtype: str | None) -> "Policy
     CPU-first load then cast/move-to-device avoids a memory spike when loading
     large policies.
     """
+    # A checkpoint may use a ProcessorStep that lives outside lerobot. Those
+    # register themselves at IMPORT time, and make_pre_post_processors() below
+    # resolves the step NAMES recorded in the checkpoint against that registry —
+    # so the module has to be imported here or the load dies with a bare
+    # KeyError listing every step except the missing one. lerobot has no plugin
+    # discovery, so there is nothing more automatic to lean on.
+    #
+    # Optional by design: only chunk-relative Grabette checkpoints need it, and
+    # a server that never serves one should not require the package.
+    for module in _OPTIONAL_STEP_MODULES:
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            logger.debug("optional processor steps not available: %s", module)
+        else:
+            logger.info("registered processor steps from %s", module)
+
     cfg = PreTrainedConfig.from_pretrained(checkpoint)
     cfg.device = "cpu"
     policy = get_policy_class(cfg.type).from_pretrained(checkpoint, config=cfg)
@@ -48,8 +79,35 @@ def load_policy_host(checkpoint: str, device: str, dtype: str | None) -> "Policy
         pretrained_path=checkpoint,
         preprocessor_overrides={"device_processor": {"device": device}},
     )
+    postprocessor = _drop_chunk_scoped_steps(postprocessor)
     return PolicyHost(policy, preprocessor, postprocessor, checkpoint=checkpoint,
                       device=device, fps=read_training_fps(checkpoint))
+
+
+def _drop_chunk_scoped_steps(postprocessor):
+    """Remove postprocessor steps that cannot run one action at a time.
+
+    This server unnormalizes per STEP — `self._post(actions[:, i])`, i.e.
+    (B, action_dim) — because that is what the wire protocol sends back. A step
+    needing the whole chunk, or state the server does not have, cannot work here.
+
+    The concrete case: Grabette's chunk-relative inverse rebuilds absolute poses
+    from the pose the robot was at when the chunk was predicted. Only the eval
+    loop knows that pose, and it does the conversion itself from the offsets, so
+    the step would raise "no reference pose available" on every request. Worse,
+    it reads a 2D tensor as (T, D), so (B, action_dim) looks like a B-step chunk.
+
+    No-op for every checkpoint that does not carry such a step.
+    """
+    keep = [st for st in postprocessor.steps
+            if type(st).__name__ not in _CHUNK_SCOPED_STEP_CLASSES]
+    if len(keep) != len(postprocessor.steps):
+        dropped = [type(st).__name__ for st in postprocessor.steps if st not in keep]
+        logger.info("dropped chunk-scoped postprocessor step(s) %s: this server "
+                    "returns per-step actions and the client converts them",
+                    ", ".join(dropped))
+        postprocessor.steps = keep
+    return postprocessor
 
 
 def read_training_fps(checkpoint: str) -> float | None:
