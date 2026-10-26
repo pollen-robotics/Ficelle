@@ -65,6 +65,8 @@ class IrohPolicyClient:
         self.last_request_bytes: int | None = None
         self._ep = None
         self._conn = None
+        self._addr = None
+        self._reconnect_lock = None  # asyncio.Lock, created on the loop thread
         self._closed = False
         if jpeg_quality is not None:
             _obsval.check_jpeg_quality(jpeg_quality)
@@ -123,10 +125,31 @@ class IrohPolicyClient:
         if relay_url is not None:
             kwargs["relay_mode"] = iroh.RelayMode.custom_from_urls([relay_url])
         self._ep = await iroh.Endpoint.bind(iroh.EndpointOptions(**kwargs))
-        addr = iroh.EndpointTicket.from_string(ticket).endpoint_addr()
-        self._conn = await self._ep.connect(addr, ALPN)
+        self._addr = iroh.EndpointTicket.from_string(ticket).endpoint_addr()
+        self._reconnect_lock = asyncio.Lock()
+        self._conn = await self._ep.connect(self._addr, ALPN)
         reply = await self._arequest(bytes([OP_META]))
         return msgpack_numpy.unpackb(reply)
+
+    async def _arequest_resilient(self, payload: bytes) -> bytes:
+        """_arequest, but survive a dropped connection (wifi blip, NAT
+        rebinding, idle timeout): on an iroh error, dial again and retry once.
+        Safe because a request is stateless on the server — replaying an
+        observation just replans."""
+        conn = self._conn
+        try:
+            return await self._arequest(payload)
+        except self._iroh.iroh_ffi.IrohError as e:
+            logger.warning(f"iroh connection lost ({e.message()}) — reconnecting")
+        async with self._reconnect_lock:
+            if self._conn is conn:  # not already replaced by a concurrent caller
+                try:
+                    conn.close(0, b"")
+                except Exception:  # noqa: BLE001 — it's already dead
+                    pass
+                self._conn = await self._ep.connect(self._addr, ALPN)
+                logger.info("iroh reconnected")
+        return await self._arequest(payload)
 
     async def _arequest(self, payload: bytes) -> bytes:
         bi = await self._conn.open_bi()
@@ -146,10 +169,15 @@ class IrohPolicyClient:
         payload = bytes([OP_INFER]) + self._packer.pack(obs)
         self.last_request_bytes = len(payload)
         try:
-            reply = self._call(self._arequest(payload), timeout=self._infer_timeout)
+            reply = self._call(self._arequest_resilient(payload), timeout=self._infer_timeout)
         except concurrent.futures.TimeoutError:
             raise PolicyServerError(
                 f"inference timed out after {self._infer_timeout:.1f}s (link degraded or server stuck)"
+            ) from None
+        except self._iroh.iroh_ffi.IrohError as e:
+            raise PolicyServerError(
+                f"iroh connection lost and reconnect failed ({e.message()}) — "
+                "check the server is running and the ticket is current"
             ) from None
         status, body = reply[0], reply[1:]
         if status == ST_ERR:

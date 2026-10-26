@@ -4,6 +4,7 @@ loopback only (RelayMode.disabled(), dial server.addr() directly — no network,
 no relays, no n0 discovery)."""
 
 import asyncio
+import logging
 import pathlib
 import subprocess
 import sys
@@ -185,6 +186,47 @@ def test_assertion_error_gets_friendly_message():
     asyncio.run(body())
 
 
+
+@pytest.mark.parametrize("finish_request", [False, True], ids=["mid-request", "mid-inference"])
+def test_client_disconnect_is_not_a_server_error(caplog, finish_request):
+    """A client that goes away (killed, Ctrl-C, network drop) while its
+    request is still being read, or while inference runs, is routine: the
+    server must not log it as an internal error, nor crash the stream task
+    trying to send an error reply on the dead stream."""
+    class SlowHost:
+        metadata = {"protocol": "ficelle/1"}
+
+        def infer(self, obs):
+            time.sleep(0.5)
+            return {"actions": np.zeros((8, 11), dtype=np.float32)}
+
+    async def body():
+        _set_event_loop()
+        server = IrohPolicyServer(SlowHost(), relay_url=None)
+        server_task = asyncio.ensure_future(server.run())
+        try:
+            await server.wait_ready()
+            client_ep = await _client_endpoint()
+            conn = await client_ep.connect(server.addr(), ALPN)
+            send = (await conn.open_bi()).send()
+            await send.write_all(bytes([OP_INFER]) + msgpack_numpy.packb(_good_obs()))
+            if finish_request:
+                await send.finish()
+            await asyncio.sleep(0.2)
+            conn.close(0, b"")
+            await client_ep.close()
+            await asyncio.sleep(1.0)  # let the server notice and the stream task end
+        finally:
+            server_task.cancel()
+            try:
+                await server_task
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(body())
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert not errors, [r.getMessage() for r in errors]
+
 # ---------------------------------------------------------------------------
 # Client-half tests: the SYNC IrohPolicyClient against a real IrohPolicyServer.
 #
@@ -336,6 +378,24 @@ def test_infer_recovers_after_timeout():
     finally:
         srv.stop()
 
+
+def test_infer_reconnects_after_connection_lost():
+    # Remote-robustness property: a dropped QUIC connection (wifi blip, NAT
+    # rebinding, idle timeout) must not kill the client for good — the next
+    # infer() dials again and succeeds. The drop is simulated by closing the
+    # client's own connection under it.
+    srv = StubServerProcess()
+    try:
+        with IrohPolicyClient(srv.ticket) as client:
+            assert client.infer(_good_obs())["actions"].shape == (8, 11)
+
+            async def _drop():
+                client._conn.close(0, b"")
+            client._call(_drop())
+            reply = client.infer(_good_obs())
+            assert reply["actions"].shape == (8, 11)
+    finally:
+        srv.stop()
 
 def test_open_client_dispatch(monkeypatch):
     calls = {}

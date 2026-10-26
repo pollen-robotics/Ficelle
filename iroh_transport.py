@@ -41,6 +41,17 @@ def _set_event_loop() -> None:
         pass  # newer bindings may set this implicitly
 
 
+async def _reply(send, data: bytes) -> None:
+    """Write one reply and finish the stream, best-effort: if the client has
+    already gone away (process killed, connection lost mid-inference) there is
+    no one left to tell, so that is logged, not raised."""
+    try:
+        await send.write_all(data)
+        await send.finish()
+    except iroh.iroh_ffi.IrohError as e:
+        logger.info(f"client went away before the reply was sent ({e.message()})")
+
+
 async def handle_stream(bi, policy_host) -> None:
     """Serve one request on one bidirectional stream, then close it.
 
@@ -50,41 +61,42 @@ async def handle_stream(bi, policy_host) -> None:
     recv, send = bi.recv(), bi.send()
     try:
         req = await recv.read_to_end(MAX_FRAME)
+    except iroh.iroh_ffi.IrohError as e:
+        # read_to_end(MAX_FRAME) raises message() == "TooLong" when the
+        # client's request exceeds the cap — report it like any other bad
+        # request. Anything else means the stream/connection died mid-request
+        # (client killed or disconnected): nothing to answer, not a server bug.
+        if e.message() == "TooLong":
+            await _reply(send, bytes([ST_ERR])
+                         + "ficelle: request too large (limit 8MB) — enable jpeg_quality/resize "
+                           "to shrink observations".encode())
+        else:
+            logger.info(f"client went away mid-request ({e.message()})")
+        return
+    try:
         if not req:
             raise ObservationError("empty request")
         op, payload = req[0], req[1:]
         if op == OP_META:
-            await send.write_all(msgpack_numpy.packb(policy_host.metadata))
-            await send.finish()
-            return
-        if op != OP_INFER:
+            reply = msgpack_numpy.packb(policy_host.metadata)
+        elif op != OP_INFER:
             raise ObservationError(f"unknown opcode {op:#04x} (expected META=0 or INFER=1)")
-        obs = msgpack_numpy.unpackb(payload)
-        # inference runs in a thread so the event loop keeps serving other
-        # streams during a long (0.5 s pi0fast) forward pass — same reasoning
-        # as the websocket server's asyncio.to_thread (see serve.py).
-        result = await asyncio.to_thread(policy_host.infer, obs)
-        await send.write_all(bytes([ST_OK]) + msgpack_numpy.packb(result))
+        else:
+            obs = msgpack_numpy.unpackb(payload)
+            # inference runs in a thread so the event loop keeps serving other
+            # streams during a long (0.5 s pi0fast) forward pass — same reasoning
+            # as the websocket server's asyncio.to_thread (see serve.py).
+            result = await asyncio.to_thread(policy_host.infer, obs)
+            reply = bytes([ST_OK]) + msgpack_numpy.packb(result)
     except ObservationError as e:
-        await send.write_all(bytes([ST_ERR]) + f"ficelle: {e}".encode())
+        reply = bytes([ST_ERR]) + f"ficelle: {e}".encode()
     except AssertionError:
         logger.error("policy failed to generate actions", exc_info=True)
-        await send.write_all(bytes([ST_ERR]) + POLICY_GENERATION_ERROR.encode())
+        reply = bytes([ST_ERR]) + POLICY_GENERATION_ERROR.encode()
     except Exception as e:  # noqa: BLE001 — protect the accept loop, report to client
-        # read_to_end(MAX_FRAME) raises iroh.iroh_ffi.IrohError (message() ==
-        # "TooLong") when the client's request exceeds the cap — report it
-        # like any other bad request instead of the generic internal-error
-        # branch below.
-        if isinstance(e, iroh.iroh_ffi.IrohError) and e.message() == "TooLong":
-            await send.write_all(
-                bytes([ST_ERR])
-                + "ficelle: request too large (limit 8MB) — enable jpeg_quality/resize "
-                  "to shrink observations".encode()
-            )
-        else:
-            logger.exception("internal error handling iroh stream")
-            await send.write_all(bytes([ST_ERR]) + f"ficelle: internal server error ({type(e).__name__})".encode())
-    await send.finish()
+        logger.exception("internal error handling iroh stream")
+        reply = bytes([ST_ERR]) + f"ficelle: internal server error ({type(e).__name__})".encode()
+    await _reply(send, reply)
 
 
 class IrohPolicyServer:
